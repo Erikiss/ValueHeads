@@ -333,3 +333,18 @@ def test_p_ttest_paper_only_in_paper_mode():
     paper = summary_row(metric, base, topk, randoms, "mask", B=10, meta={"mode": "paper"})
     assert 0 <= paper["p_ttest_paper"] <= 1
     assert np.isnan(summary_row(metric, base, topk, randoms, "mask", B=10, meta=None)["p_ttest_paper"])
+
+
+def test_save_manifest_merges_other_sessions_revisions(tmp_path):
+    """Two sweeps on one root (parallel Colab sessions over disjoint revisions) must not clobber each other's entries."""
+    from valueheads_pythia.commands.sweep import load_manifest, save_manifest
+    path = str(tmp_path / "manifest.json")
+    a = {"model": "pythia-160m", "revisions": {"step0": {"a": 1}}}
+    save_manifest(path, a)
+    b = {"model": "pythia-160m", "revisions": {"step143000": {"b": 2}}}
+    save_manifest(path, b)
+    a["revisions"]["step0"] = {"a": 3}
+    save_manifest(path, a)
+    on_disk = load_manifest(path)
+    assert on_disk["revisions"] == {"step0": {"a": 3}, "step143000": {"b": 2}}
+    assert a["revisions"]["step143000"] == {"b": 2}

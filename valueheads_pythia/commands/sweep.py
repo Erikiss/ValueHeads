@@ -139,9 +139,18 @@ def load_manifest(path):
 
 
 def save_manifest(path, manifest):
+    """Atomic write, merged with the file on disk: another sweep on the same root (e.g. a second Colab session
+    covering other revisions of the same model) keeps its revision entries; ours win for the revisions we hold."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    try:
+        on_disk = load_manifest(path)
+    except (OSError, ValueError):
+        on_disk = {"revisions": {}}
+    revisions = dict(on_disk.get("revisions") or {})
+    revisions.update(manifest.get("revisions") or {})
+    manifest["revisions"] = revisions
     manifest["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    tmp = path + ".tmp"
+    tmp = path + f".tmp{os.getpid()}"
     with open(tmp, "w") as f:
         json.dump(manifest, f, indent=1)
     os.replace(tmp, path)

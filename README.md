@@ -76,6 +76,33 @@ VH_NB_SMOKE=1 VH_NB_PROJECT=/pfad/zum/projekt VH_ROOT=/tmp/vh_nb VH_FEATURES=/tm
   notebooks/ValueHeadsPythia_Colab.ipynb
 ```
 
+
+## Parallel auf A100 (6 Sessions, zwei Colab-Pro+-Konten)
+
+`notebooks/runs/` enthält je Modell ein fertiges Run-Notebook (erzeugt von `scripts/make_run_notebooks.py` aus dem
+Master-Notebook; nach jeder Änderung am Master neu erzeugen). Jedes Notebook schreibt in einen eigenen Drive-Ordner
+`MyDrive/ValueHeadsPythia/<modell>/`, Sessions desselben Kontos stören sich daher nicht. pythia-2.8b ist in zwei
+Sessions geteilt: der **Sweep-Teil** extrahiert und probt die 9 Checkpoints ohne Likelihood-Evals, der **Causal-Teil**
+macht `step2000`, `step16000`, `step143000` inklusive Evals, Kontrollen, Generation und Analyse (beide in denselben
+Drive-Ordner; `results/manifest.json` wird dabei gemischt, nicht überschrieben).
+
+| Konto | Session | Notebook (Colab-Link) | A100-Schätzung |
+|---|---|---|---|
+| A | 1 | [pythia-160m](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/pythia-160m.ipynb) | 5-7 h |
+| A | 2 | [pythia-410m](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/pythia-410m.ipynb) | 8-10 h |
+| A | 3 | [pythia-1b](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/pythia-1b.ipynb) | 7-9 h |
+| B | 1 | [pythia-1.4b](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/pythia-1.4b.ipynb) | 7-9 h |
+| B | 2 | [pythia-2.8b-sweep](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/pythia-2.8b-sweep.ipynb) | ~9 h |
+| B | 3 | [pythia-2.8b-causal](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/pythia-2.8b-causal.ipynb) | 12-13 h |
+
+Je Session: Link öffnen → Laufzeit → Laufzeittyp ändern → A100 → Laufzeit → Alle ausführen → Drive-Freigabe
+bestätigen. Mit Colab Pro+ laufen die Sessions nach dem Schließen des Tabs weiter (Hintergrundausführung). Optionale
+Colab-Secrets je Konto (Schlüssel-Symbol, „Notebook-Zugriff“ aktivieren): `HF_TOKEN` (höhere Hub-Rate-Limits bei
+parallelen Downloads), `OPENROUTER_API_KEY` (exakter Paper-Judge statt der lokalen Judges, ca. 1-2 USD je Modell).
+Ohne lokalen vLLM-Server fällt Zelle 10 auf die lokalen Judges der t4-Stufe zurück (auf A100 in fp16); fehlt jeder
+Judge, läuft der Sweep trotzdem weiter. Endet der 2.8b-Sweep-Teil nach dem Causal-Teil, Zelle 12 des Causal-Notebooks
+erneut ausführen (Sweep-Kurven über alle 12 Checkpoints).
+
 ## Schnellstart CLI
 
 ```bash
