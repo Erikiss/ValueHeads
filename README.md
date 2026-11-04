@@ -281,6 +281,10 @@ Notebook im `SMOKE`-Modus ≈ 3-5 min.
 
 ## Grenzen (nicht implementiert oder hier nicht ausführbar)
 
+- **GPU-Pfad nur teilweise nachgewiesen**: Tests, Smoke-Kette und Notebook-Smoke liefen auf CPU. Der erste Colab-Lauf auf
+  einer T4 (2026-11-04) fand einen Device-Fehler im Selftest (Token-IDs blieben auf der CPU; behoben). Alle anderen
+  Forward-Pfade (`ActivationCollector.collect`, Likelihood-Evals, Generation, Hooks, Judges) verschieben ihre Eingaben
+  explizit auf `model.device`; der Beleg auf CUDA ist der Selftest in Notebook-Zelle 4.
 Aus dem Vollständigkeits-Check gegen DESIGN; jeweils mit dem Grund, warum es (noch) fehlt:
 
 - **Echte Judge-Läufe** (ArmoRM 4-bit, TruthfulQA-Judges, Qwen3Guard auf GPU, OpenRouter/vLLM) und die Stufen `t4`/`t4_api`/

@@ -105,7 +105,7 @@ def check_mask_positions(model, tokenizer, eps=config.MASK_EPS, tol=1e-5):
     """positions='all' changes log p at every position, 'last' only at the last one, decode_only hooks are a
     no-op in a teacher-forced forward but act on KV-cache decoding steps. Returns a dict with 'ok'."""
     L, H, D = model_geometry(model.config)
-    ids = tokenizer(TEXT, return_tensors="pt").input_ids
+    ids = tokenizer(TEXT, return_tensors="pt").input_ids.to(model.device)      # model device (cuda on Colab)
     S = ids.shape[1]
     heads = {l: list(range(H)) for l in range(3, min(9, L))}
 
