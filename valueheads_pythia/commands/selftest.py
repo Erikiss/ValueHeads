@@ -16,7 +16,7 @@ from .. import config
 from ..cli import add_common_args
 from ..data import eval_pairs, eval_set, hh_pairs, probing_set, truthfulqa_indices, wikitext
 from ..hooks import ActivationCollector, HeadMask, HeadSteer
-from ..models import load_model, model_geometry, o_proj, qkv_value_rows
+from ..models import load_model, model_geometry, num_kv_heads, o_proj, q_proj_rows, value_rows
 
 TEXT = "Question: What happens if an earthworm is cut in half? Answer: It becomes two worms."
 SHORT = "Hello world"
@@ -46,34 +46,46 @@ EXPECTED = {
 @torch.no_grad()
 def check_hook_layout(model, tokenizer, layer=5, head=7):
     """Zeroing the V rows of `head` in `layer` zeroes exactly that head's slice at the o_proj input (others
-    unchanged); batched right-padded collection equals per-text collection. Returns a dict with 'ok'."""
+    unchanged); batched right-padded collection equals per-text collection. Returns a dict with 'ok'.
+
+    GPT-NeoX: the V rows of `head` in the fused query_key_value. Llama-style / GQA (Qwen3, Llama-3): the v_proj rows (and
+    bias, if any) of KV group g = head // (H / KV); exactly the o_proj-input slices of the H / KV query heads of group g
+    must become zero, all other heads of the layer stay bit-identical (checks the h // n_rep mapping and head_dim)."""
     L, H, D = model_geometry(model.config)
     enc = tokenizer(TEXT, return_tensors="pt")
     coll = ActivationCollector(model)
     with coll:
         base = coll.collect(enc.input_ids, enc.attention_mask)[0]            # (L, H*D)
-    qkv, rows = qkv_value_rows(model, layer, head)
-    w_backup, b_backup = qkv.weight[rows].clone(), qkv.bias[rows].clone()
-    qkv.weight[rows] = 0
-    qkv.bias[rows] = 0
+    linear, rows, zero_heads, kv_group = value_rows(model, layer, head)     # NeoX: [head]; GQA: the heads of a KV group
+    w_backup = linear.weight[rows].clone()
+    b_backup = linear.bias[rows].clone() if linear.bias is not None else None
+    linear.weight[rows] = 0
+    if b_backup is not None:
+        linear.bias[rows] = 0
     try:
         with coll:
             zeroed = coll.collect(enc.input_ids, enc.attention_mask)[0]
     finally:
-        qkv.weight[rows] = w_backup
-        qkv.bias[rows] = b_backup
-    sl = slice(head * D, (head + 1) * D)
-    other = torch.ones(H * D, dtype=torch.bool)
-    other[sl] = False
+        linear.weight[rows] = w_backup
+        if b_backup is not None:
+            linear.bias[rows] = b_backup
+    sl = torch.zeros(H * D, dtype=torch.bool)
+    for h in zero_heads:
+        sl[h * D:(h + 1) * D] = True
+    other = ~sl
     res = {
         "geometry": (L, H, D),
         "hook_input_width": int(base.shape[-1]),
         "zeroed_head_absmax": float(zeroed[layer, sl].abs().max()),
-        "other_heads_same_layer_maxdiff": float((zeroed[layer, other] - base[layer, other]).abs().max()),
+        "other_heads_same_layer_maxdiff": float((zeroed[layer, other] - base[layer, other]).abs().max()) if other.any() else 0.0,
         "earlier_layers_maxdiff": float((zeroed[:layer] - base[:layer]).abs().max()),
         "later_layer_maxdiff": float((zeroed[layer + 1] - base[layer + 1]).abs().max()) if layer + 1 < L else None,
-        "base_head_absmax": float(base[layer, sl].abs().max()),
+        "base_head_absmax": min(float(base[layer, h * D:(h + 1) * D].abs().max()) for h in zero_heads),
     }
+    if kv_group is not None:                       # Llama-style v_proj (GQA): which KV group and query heads were zeroed
+        kv = num_kv_heads(model.config)
+        res.update(kv_heads=kv, kv_group=kv_group, zeroed_heads=list(zero_heads), group_size_ok=len(zero_heads) == H // kv,
+                   value_rows_bias=b_backup is not None)
     # batched right padding vs single texts: the layout gate runs in fp32 (lossless up-cast of half-precision models),
     # the native dtype is reported and only sanity-gated (fp16 rounding noise of the large models, DESIGN 3.1 [korr.])
     native = str(model.dtype).replace("torch.", "")
@@ -101,7 +113,45 @@ def check_hook_layout(model, tokenizer, layer=5, head=7):
     res["ok"] = (res["hook_input_width"] == H * D and res["zeroed_head_absmax"] == 0.0
                  and res["other_heads_same_layer_maxdiff"] == 0.0 and res["earlier_layers_maxdiff"] == 0.0
                  and (res["later_layer_maxdiff"] or 0) > 0 and res["base_head_absmax"] > 0
-                 and res["batch_consistent"] and res["pad_count_row1"] > 0)
+                 and res["batch_consistent"] and res["pad_count_row1"] > 0
+                 and res.get("group_size_ok", True))
+    return res
+
+
+@torch.no_grad()
+def check_query_head_layout(model, tokenizer, layer=5, head=7):
+    """Llama-style blocks only (None for GPT-NeoX): zeroing the q_proj rows (and bias) of query head `head` makes its
+    query 0 (still 0 after q_norm and RoPE), so its attention turns uniform. Exactly that head's o_proj-input slice must
+    change; every other head of the layer -- the other query heads of its KV group included -- stays bit-identical, and
+    so do earlier layers. This pins the per-query-head index (which the ICL census uses) at head resolution; the v_proj
+    check of check_hook_layout only resolves whole KV groups (a permutation inside a group would pass it)."""
+    hit = q_proj_rows(model, layer, head)
+    if hit is None:
+        return None
+    linear, rows = hit
+    L, H, D = model_geometry(model.config)
+    enc = tokenizer(TEXT, return_tensors="pt")
+    coll = ActivationCollector(model)
+    with coll:
+        base = coll.collect(enc.input_ids, enc.attention_mask)[0]
+    w_backup = linear.weight[rows].clone()
+    b_backup = linear.bias[rows].clone() if linear.bias is not None else None
+    linear.weight[rows] = 0
+    if b_backup is not None:
+        linear.bias[rows] = 0
+    try:
+        with coll:
+            changed = coll.collect(enc.input_ids, enc.attention_mask)[0]
+    finally:
+        linear.weight[rows] = w_backup
+        if b_backup is not None:
+            linear.bias[rows] = b_backup
+    diff = (changed[layer] - base[layer]).abs().reshape(H, D).amax(dim=1)
+    changed_heads = [int(h) for h in torch.nonzero(diff > 0).flatten()]
+    res = {"head": head, "changed_heads": changed_heads, "head_maxdiff": float(diff[head]),
+           "other_heads_same_layer_maxdiff": float(torch.cat([diff[:head], diff[head + 1:]]).max()) if H > 1 else 0.0,
+           "earlier_layers_maxdiff": float((changed[:layer] - base[:layer]).abs().max()) if layer > 0 else 0.0}
+    res["ok"] = changed_heads == [head] and res["earlier_layers_maxdiff"] == 0.0
     return res
 
 
@@ -291,6 +341,9 @@ def run(args):
           f"transformers={info['transformers']} torch={info['torch']}")
     results = {}
     results["hook_layout"] = check_hook_layout(model, tokenizer, args.layer, args.head)
+    query = check_query_head_layout(model, tokenizer, args.layer, args.head)    # Llama / Qwen only; None for GPT-NeoX
+    if query is not None:
+        results["query_head_layout"] = query
     results["mask_positions"] = check_mask_positions(model, tokenizer)
     if args.data != "none":
         results["data_counts"] = check_data_counts(args.data, tokenizer)

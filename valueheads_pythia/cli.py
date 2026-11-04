@@ -22,6 +22,7 @@ COMMANDS = {
     "sweep": "Checkpoint-Sweep (extract -> probe -> directions je Revision)",
     "analyze": "Heatmaps, Sweep-Kurven, Korrelationen, Report",
     "selftest": "Hook-Layout, Masken-Positionen, Datenzaehlungen",
+    "overlap": "Wert-Heads x ICL-Rollen (Qwen3, arXiv 2611.05344): layer-gematchte Permutations-Null, Spearman, Holm",
 }
 
 

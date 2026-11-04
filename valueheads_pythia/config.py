@@ -19,11 +19,32 @@ MODELS = {
     # Paper models (for `--mode paper` comparability; gated Llama models need HF_TOKEN).
     "llama3.1_8B_instruct": {"hf_id": "meta-llama/Meta-Llama-3.1-8B-Instruct", "layers": 32, "heads": 32, "head_dim": 128, "hidden": 4096, "k15": 153},
     "llama3.2_3B_instruct": {"hf_id": "meta-llama/Llama-3.2-3B-Instruct", "layers": 28, "heads": 24, "head_dim": 128, "hidden": 3072, "k15": 100},
-    "qwen3-8B": {"hf_id": "Qwen/Qwen3-8B", "layers": 36, "heads": 32, "head_dim": 128, "hidden": 4096, "k15": 172},
-    "qwen3-4B": {"hf_id": "Qwen/Qwen3-4B", "layers": 36, "heads": 32, "head_dim": 128, "hidden": 2560, "k15": 172},
     "yi-1.5-9B": {"hf_id": "01-ai/Yi-1.5-9B-Chat", "layers": 48, "heads": 32, "head_dim": 128, "hidden": 4096, "k15": 230},
     "yi-1.5-6B": {"hf_id": "01-ai/Yi-1.5-6B-Chat", "layers": 32, "heads": 32, "head_dim": 128, "hidden": 4096, "k15": 153},
+    # Qwen3 (Llama-style blocks, GQA with 8 KV heads, q/k RMSNorm, no attention bias, trained in bf16). head_dim = 128 is set
+    # in the config and is NOT hidden / heads: the o_proj input width is heads * head_dim (0.6b: 2048 vs hidden 1024; 4b:
+    # 4096 vs 2560). Query head h reads KV head h // (heads / kv_heads). The post-trained models (no "-base") are the paper
+    # models (Qwen/Qwen3-4B, Qwen/Qwen3-8B; probed on raw text without chat template, exactly as the reference repo does);
+    # qwen3-*-base are the models of the ICL-circuit census (arXiv 2611.05344). Geometry checked against each config.json.
+    "qwen3-0.6b": {"hf_id": "Qwen/Qwen3-0.6B", "family": "qwen3", "size_class": "mid", "layers": 28, "heads": 16, "kv_heads": 8,
+                   "head_dim": 128, "hidden": 1024, "k15": 67},
+    "qwen3-0.6b-base": {"hf_id": "Qwen/Qwen3-0.6B-Base", "family": "qwen3", "size_class": "mid", "layers": 28, "heads": 16,
+                        "kv_heads": 8, "head_dim": 128, "hidden": 1024, "k15": 67},
+    "qwen3-1.7b": {"hf_id": "Qwen/Qwen3-1.7B", "family": "qwen3", "size_class": "mid", "layers": 28, "heads": 16, "kv_heads": 8,
+                   "head_dim": 128, "hidden": 2048, "k15": 67},
+    "qwen3-1.7b-base": {"hf_id": "Qwen/Qwen3-1.7B-Base", "family": "qwen3", "size_class": "mid", "layers": 28, "heads": 16,
+                        "kv_heads": 8, "head_dim": 128, "hidden": 2048, "k15": 67},
+    "qwen3-4b": {"hf_id": "Qwen/Qwen3-4B", "family": "qwen3", "size_class": "large", "layers": 36, "heads": 32, "kv_heads": 8,
+                 "head_dim": 128, "hidden": 2560, "k15": 172},
+    "qwen3-4b-base": {"hf_id": "Qwen/Qwen3-4B-Base", "family": "qwen3", "size_class": "large", "layers": 36, "heads": 32,
+                      "kv_heads": 8, "head_dim": 128, "hidden": 2560, "k15": 172},
+    "qwen3-8b": {"hf_id": "Qwen/Qwen3-8B", "family": "qwen3", "size_class": "large", "layers": 36, "heads": 32, "kv_heads": 8,
+                 "head_dim": 128, "hidden": 4096, "k15": 172},
+    "qwen3-8b-base": {"hf_id": "Qwen/Qwen3-8B-Base", "family": "qwen3", "size_class": "large", "layers": 36, "heads": 32,
+                      "kv_heads": 8, "head_dim": 128, "hidden": 4096, "k15": 172},
 }
+# Other spellings -> registry short name (the reference repo calls the Qwen3 paper models "qwen3-4B" / "qwen3-8B").
+MODEL_ALIASES = {"qwen3-4B": "qwen3-4b", "qwen3-8B": "qwen3-8b"}
 
 PYTHIA_SIZES = ["pythia-160m", "pythia-410m", "pythia-1b", "pythia-1.4b", "pythia-2.8b"]
 
@@ -114,7 +135,11 @@ TIER_NAMES = list(TIERS)
 
 
 def size_class(model_name):
-    """'small' (160m/410m), 'mid' (1b/1.4b) or 'large' (2.8b and paper models)."""
+    """'small' (160m/410m), 'mid' (1b/1.4b) or 'large' (2.8b and paper models). A registry entry may set its own
+    "size_class" (Qwen3: 0.6b / 1.7b 'mid', 4b / 8b 'large'); Pythia entries have none and use the name rules."""
+    info = MODELS.get(model_short_name(model_name))
+    if info and "size_class" in info:
+        return info["size_class"]
     name = model_name.lower()
     if any(s in name for s in ("160m", "410m")):
         return "small"
@@ -169,9 +194,33 @@ DTYPE_POLICY = {
 }
 
 
+# Model families with their own numerics policy, checked before the size classes above (which stay the Pythia policy).
+# Qwen3 is trained and released in bf16: bf16 + sdpa on GPU (fp16 can overflow in the residual stream of bf16-trained models;
+# the reference repo loads every model in fp16, reproducible with --dtype float16), float32 + eager on the CPU.
+FAMILY_DTYPE_POLICY = {
+    "qwen3": {"cpu": ("float32", "eager"), "cuda": ("bfloat16", "sdpa")},
+}
+
+
+def model_family(model_name):
+    """'pythia', 'qwen3', ... from the registry entry ("family") or the name; None if unknown."""
+    info = MODELS.get(model_short_name(model_name))
+    if info and info.get("family"):
+        return info["family"]
+    name = model_name.lower()
+    if "pythia" in name:
+        return "pythia"
+    if "qwen3" in name:
+        return "qwen3"
+    return None
+
+
 def dtype_policy(model_name, device="cpu"):
     """(dtype name, attn_implementation) recommended for `model_name` on `device` ('cpu'|'cuda'|'mps')."""
     dev = "cuda" if str(device).startswith(("cuda", "mps")) else "cpu"
+    family = FAMILY_DTYPE_POLICY.get(model_family(model_name))
+    if family is not None:
+        return family[dev]
     return DTYPE_POLICY[size_class(model_name)][dev]
 
 
@@ -208,9 +257,11 @@ def paths(root=None):
 
 
 def model_short_name(name_or_hf_id):
-    """Short registry name for a model (unknown HF ids are sanitized: 'org/model' -> 'org__model')."""
+    """Short registry name for a model (aliases resolved; unknown HF ids are sanitized: 'org/model' -> 'org__model')."""
     if name_or_hf_id in MODELS:
         return name_or_hf_id
+    if name_or_hf_id in MODEL_ALIASES:
+        return MODEL_ALIASES[name_or_hf_id]
     for short, info in MODELS.items():
         if info["hf_id"] == name_or_hf_id:
             return short

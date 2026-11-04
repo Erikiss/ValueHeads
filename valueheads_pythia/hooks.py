@@ -2,7 +2,9 @@
 
 Adapted from sihuo-design/valueheads `hooks.py` (MIT). The input of `o_proj` (GPT-NeoX: `attention.dense`)
 has shape (batch, seq, num_heads * head_dim) and is the concatenation of the per-head attention outputs,
-so head h of a layer occupies the slice [h * head_dim, (h + 1) * head_dim).
+so head h of a layer occupies the slice [h * head_dim, (h + 1) * head_dim). With grouped-query attention (Qwen3,
+Llama-3) num_heads counts the query heads (Qwen3-4B: 32 x 128 = 4096, not hidden_size 2560); the 8 KV heads are
+shared by blocks of num_heads / 8 consecutive query heads, but every query head keeps its own o_proj-input slice.
 
 Extensions over the reference implementation (DESIGN 3.1):
   * `positions="last"` edits only the last position of every row (paper semantics, generation path), `positions="all"`
@@ -54,6 +56,9 @@ class HeadHooks:
     def _hook(self, layer):
         def pre_hook(module, args, kwargs):
             x = args[0] if args else kwargs["input"]
+            if x.shape[-1] != self.num_heads * self.head_dim:
+                raise ValueError(f"o_proj input of layer {layer} has width {x.shape[-1]}, model_geometry gives "
+                                 f"{self.num_heads} x {self.head_dim} = {self.num_heads * self.head_dim}")
             if self.decode_only and x.shape[1] != 1:
                 return None
             if args:

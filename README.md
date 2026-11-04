@@ -174,6 +174,68 @@ Numerik-Policy (DESIGN 3.1): **fp32 für 160m/410m auf jedem Gerät**, ab 1b auf
 in bf16/fp16 ist auf Pythia verboten (massive Aktivierungen, NaN ab Layer 5) und wird von `load_model` abgewiesen.
 Ein dtype/Backend pro Studie, protokolliert in `results/manifest.json`.
 
+**Qwen3 (Llama-Blöcke, GQA, `head_dim` ≠ hidden/heads).** Registry: `qwen3-0.6b`, `qwen3-0.6b-base`, `qwen3-1.7b(-base)`,
+`qwen3-4b`, `qwen3-4b-base`, `qwen3-8b(-base)` (Repo-Schreibweise `qwen3-4B`/`qwen3-8B` als Alias). Hook-Site
+`model.layers[l].self_attn.o_proj`, Breite `heads·head_dim` (4B: 32·128 = 4096 ≠ hidden 2560; 0.6B: 16·128 = 2048 ≠ 1024),
+Head-Index = Query-Head (wie im ICL-Census); 8 KV-Heads, Query-Head h liest KV-Gruppe h // (H/8). k15 = 172 (4B/8B), 67
+(0.6B/1.7B). Numerik: GPU `bfloat16` + `sdpa`, CPU `float32` + `eager` (`config.FAMILY_DTYPE_POLICY`; Pythia unverändert).
+Das Referenz-Repo lädt in fp16 (`--dtype float16` reproduziert das; auf Qwen3-0.6B-Base liegen die Hook-Eingaben in fp16 ~8× näher an fp32 als in
+bf16, Residual-max ≈ 6.4e3, endlich – auf 4B/8B vorher mit dem Selftest prüfen). Selftest für Llama/Qwen: die `v_proj`-Zeilen
+(und Bias) der KV-Gruppe des Test-Heads werden genullt, genau die H/KV Query-Heads dieser Gruppe müssen am o_proj-Eingang
+null werden, alle anderen bit-identisch bleiben (`--head 7` → Gruppe 3, Heads 6-7 bei 0.6B); dazu ein Gate je Query-Head
+(`query_head_layout`): die `q_proj`-Zeilen des Test-Heads werden genullt (Query 0 → uniforme Attention), genau dessen
+Slice muss sich ändern, die anderen Heads seiner KV-Gruppe bleiben bit-identisch. Die post-trainierten
+Paper-Modelle werden wie im Repo auf Rohtext probiert (kein Chat-Template, kein BOS, damit auch kein Thinking-Modus). Für
+Paper-Treue `extract --mode paper --max_length 0` (der Pythia-Default 2048 kürzt sonst einzelne HelpSteer2-Texte).
+
+## Wert-Heads × ICL-Schaltkreis (Qwen3, `overlap`)
+
+Überlappen die Wert-Heads mit den Bausteinen des In-Context-Learning-Schaltkreises (Gao & Gao, arXiv 2611.05344)?
+`valueheads_pythia/icl_sets.py` hält die Kopf-Sätze mit Quellen (Census D188: Leser / Bremsen / P-Bremsen / P-Träger in
+Layer 16-35 für 4B/8B, 10-27 für 0.6B/1.7B, sha256-geprüft vom gepinnten Repo-Commit; benannte Rollen nur, wo die Quelle
+die vollständige Liste nennt), `overlap` testet:
+
+```bash
+python -m valueheads_pythia.cli overlap --model Qwen/Qwen3-4B --values honesty harmless helpful helpfulness complexity \
+    verbosity coherence --rankings pythia paper --paper_tag pyfeat --draws 100000 --perms 20000
+```
+
+- **(a, primär)** je Wert × Rolle, nur im Testband der Rolle: Überlappung und Jaccard der Top-k (15 %) gegen eine
+  layer-gematchte Permutations-Null (≥ 10 000 Ziehungen, einseitige p für Anreicherung und Abreicherung). Bei GQA
+  (Qwen3: 4 Query-Heads teilen eine `v_proj`) ist die Null **KV-Gruppen-erhaltend**: je Layer werden die KV-Gruppen und
+  die Heads in den Gruppen permutiert, so bleibt die Häufung der Wert-Heads in KV-Gruppen erhalten. Eine Null mit
+  austauschbaren Heads ist dort antikonservativ (Simulation des Reviews: Fehlerrate 0.29-0.36 statt 0.05 für
+  gruppenweise gehäufte Wert-Sätze; mit der KV-Null 0.02 bzw. 0.003) und steht nur noch als Vergleichsspalte
+  (`*_layer`, `p_holm_layer`) neben der exakten hypergeometrischen Null. `value_kv_groups` (das ICL-Paper nennt KV-Gruppen,
+  nicht Heads) wird auf Gruppenebene getestet: Zahl der drei Gruppen mit ≥ 1 Top-k-Head, Gruppen je Layer permutiert.
+- **(b)** Spearman zwischen Wert-Score je Head (AUC bzw. Accuracy) und Census-Effekt (dret, dR, dP, |dret|), Null =
+  Permutation innerhalb der Layer. **(c)** Anteil der Top-k je Rolle (Teil-Listen nur als Untergrenze, nie getestet).
+- **(d)** Holm über eine **vorab festgelegte Familie** je Modell und Ranking: Wert × {Census-Leser, -Bremsen, -P-Bremsen,
+  -P-Träger, benannte Schaltkreis-Heads L20-27, Query-Typ-Heads L20-27 (22:10, 23:26, 20:5, 23:25), L0-19-Zusätze,
+  Wert-KV-Gruppen}. 2-5-Head-Teillisten, die Vereinigung der Screen-Zusätze und die gemeinsamen Top-5 4B/8B sind
+  deskriptiv (p ohne Befund). Vor Holm entfernt Tarones Regel Tests, deren kleinstes erreichbares p (aus der Null, nicht
+  aus den Daten) über α/K liegt. Familie, K und ausgeschlossene Tests stehen in JSON und Markdown; keine Korrektur über
+  die Modellvarianten (`p_holm_all` = beide Rankings). „angereichert“ / „abgereichert“ steht nur bei Holm-p < 0.05.
+- Ranking `pythia` = Head-only-AUC-Tabelle, `paper` = [Head ⊕ Layer-Mittel]-Accuracy-Tabelle (`--paper_tag pyfeat`: der
+  Paper-Probe auf den pythia-Features, `probe --mode paper --train_dir … --feature_tag pyfeat`). Im Ranking `paper` steht
+  für `harmless` der Harmlessness-Satz der Referenz, **`harmless_pooled`** (HH-RLHF-Default-Konfiguration, alle vier
+  Teilmengen; eigene Extraktion `extract --mode paper --dataset harmless_pooled`, Tabelle ohne Tag;
+  `--paper_harmless harmless` nimmt stattdessen harmless-base, das ist nicht der Referenz-Satz). Das Ranking `pythia`
+  behält harmless-base. Die Ausgabe zählt je Tabelle die Gleichstände an der Top-k-Grenze (Accuracy-Rankings auf kleinen
+  Val-Sätzen entscheiden einen Teil der Top-k per Index-Reihenfolge). Post-trainierte Modelle (`Qwen/Qwen3-4B`) bekommen
+  die Sätze ihres Base-Modells und werden als **übertragen** markiert.
+- Ausgabe `results/overlap/{modell}_{rev}_overlap.{json,md}` und `…_overlap_{topk,spearman,shares}.csv`; idempotent.
+
+Run-Notebook für eine A100: `notebooks/runs/qwen3-4b-overlap.ipynb` (erzeugt von `scripts/make_overlap_notebook.py`;
+[Colab-Link](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/qwen3-4b-overlap.ipynb)):
+Selftest (inkl. Query-Head-Gate), Extraktion ohne Truncation, Probing + probe-stats für `Qwen/Qwen3-4B` und
+`Qwen/Qwen3-4B-Base` (alle 7 Werte, a100-Stichproben; `harmless_pooled` als uniforme Teilstichprobe von 20 000 der
+98 872 Train-Texte, alle 5 224 Val-Texte, `HARMLESS_POOLED_ALL = True` für alle), `overlap` gegen die 4B-Base-Sätze,
+Ergebnisse unter `MyDrive/ValueHeadsPythia/qwen3-4b/`. Das Ranking `paper` rechnet auf bf16-Features (sdpa, gebatcht,
+rechts gepaddet), die Referenz in fp16 Text für Text. Schätzung ~2.1 A100-Stunden (1.6-3.2 h), bei 5.4-8.5 CU je
+A100-Stunde ≈ 11-18 CU (Spanne 9-27); 15.6 M Tokens je Modell; die Probe-Zeit bei N = 20 000 ist ungemessen. CPU-Smoke
+derselben Datei: `VH_NB_SMOKE=1 VH_NB_MODELS=Qwen/Qwen3-0.6B-Base` (Rezept im Kopf des Generators).
+
 ## Modus `paper` vs. `pythia`
 
 | | `--mode paper` | `--mode pythia` (Default) |
@@ -348,10 +410,12 @@ Aus dem Vollständigkeits-Check gegen DESIGN; jeweils mit dem Grund, warum es (n
 
 ```
 valueheads_pythia/      config, models (o_proj-Resolver, Numerik-Policy), hooks, data, extract, probing, probing_stats,
-                        directions, controls, eval_likelihood, eval_generate, stats, hf_cache, judge/ (inkl. armorm_model),
+                        directions, controls, eval_likelihood, eval_generate, stats, hf_cache, icl_sets, overlap, judge/ (inkl. armorm_model),
                         analysis/ (inkl. causal_plots), commands/, cli
-scripts/                run_smoke.sh, run_localize.sh, run_causal.sh, run_sweep.sh
-notebooks/              ValueHeadsPythia_Colab.ipynb (12 Zellen, ohne Ausgaben gespeichert)
+scripts/                run_smoke.sh, run_localize.sh, run_causal.sh, run_sweep.sh, make_run_notebooks.py,
+                        make_overlap_notebook.py
+notebooks/              ValueHeadsPythia_Colab.ipynb (12 Zellen, ohne Ausgaben gespeichert); runs/ (erzeugte Run-Notebooks,
+                        u. a. qwen3-4b-overlap.ipynb)
 tests/                  pytest (Hook-Layout, Masken-Positionen, Datenzählungen, Probing vs. Referenz-Repo, Resume, ...)
 data/                   jailbreakbench.csv, maliciousinstruct.csv (nur Modus paper)
 docs/                   eval_likelihood.md

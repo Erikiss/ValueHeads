@@ -22,7 +22,7 @@ from tqdm.auto import tqdm
 from . import config
 from .data import texts_fingerprint
 from .hooks import ActivationCollector
-from .models import model_geometry
+from .models import model_geometry, num_kv_heads
 
 MANIFEST = "manifest.json"
 DONE = "DONE"
@@ -136,6 +136,11 @@ def extract_features(model, tokenizer, texts, out_dir, batch_size=16, max_length
         "label_sets": sorted(labels) if isinstance(labels, dict) else (["labels"] if labels is not None else []),
         "has_groups": groups is not None,
     }
+    kv = num_kv_heads(model.config)
+    if kv != H or width != model.config.hidden_size:
+        # GQA / head_dim decoupled from hidden (Qwen3, Llama-3): record the KV grouping (query head h reads KV head
+        # h // (H / kv_heads)) and the residual width; GPT-NeoX manifests keep their previous keys
+        base.update(kv_heads=kv, hidden=model.config.hidden_size)
     base.update(extra_manifest or {})
 
     manifest_path = os.path.join(out_dir, MANIFEST)

@@ -3,6 +3,8 @@
 Adapted from sihuo-design/valueheads `models.py` (MIT). Changes for Pythia / transformers 5:
 `dtype=` loader kwarg, `revision=` for checkpoints, numerics policy (DESIGN 3.1), and an
 architecture-agnostic `o_proj` resolver (GPT-NeoX `attention.dense` and Llama-style `self_attn.o_proj`).
+Qwen3 / Llama-style GQA: geometry from config.head_dim, KV-group helpers (num_kv_heads, kv_group_heads, v_proj_rows)
+for the self-test, per-family numerics policy (config.FAMILY_DTYPE_POLICY).
 """
 import os
 import random
@@ -30,12 +32,34 @@ def set_seed(seed):
 def model_geometry(cfg):
     """(num_layers, num_heads, head_dim) of the attention stack of a HF config.
 
-    GPTNeoXConfig has no `head_dim`, so hidden_size // num_heads is used (64 for pythia-160m).
+    num_heads counts QUERY heads; the o_proj input (hook site) has width num_heads * head_dim. GPTNeoXConfig has no
+    `head_dim`, so hidden_size // num_heads is used (64 for pythia-160m). Qwen3 sets head_dim = 128 explicitly, which is
+    not hidden_size // num_heads (Qwen3-0.6B: 16 x 128 = 2048 vs hidden 1024; Qwen3-4B: 32 x 128 = 4096 vs 2560).
     """
     num_layers = cfg.num_hidden_layers
     num_heads = cfg.num_attention_heads
     head_dim = getattr(cfg, "head_dim", None) or cfg.hidden_size // num_heads
     return num_layers, num_heads, head_dim
+
+
+def num_kv_heads(cfg):
+    """Number of key/value heads (GQA: Qwen3 / Llama-3 have 8; GPT-NeoX has one per query head)."""
+    _, num_heads, _ = model_geometry(cfg)
+    kv = getattr(cfg, "num_key_value_heads", None) or num_heads
+    if num_heads % kv:
+        raise ValueError(f"num_attention_heads {num_heads} is not a multiple of num_key_value_heads {kv}")
+    return kv
+
+
+def kv_group_heads(cfg, group):
+    """Query heads that read KV head `group`: transformers' repeat_kv expands KV head g to the query heads
+    g * n_rep ... (g + 1) * n_rep - 1 with n_rep = num_heads // num_kv_heads (query head h reads KV head h // n_rep)."""
+    _, num_heads, _ = model_geometry(cfg)
+    kv = num_kv_heads(cfg)
+    if not 0 <= group < kv:
+        raise ValueError(f"KV group {group} out of range for {kv} KV heads")
+    n_rep = num_heads // kv
+    return list(range(group * n_rep, (group + 1) * n_rep))
 
 
 def resolve_device(device="auto"):
@@ -80,10 +104,11 @@ def resolve_commit_sha(hf_id, revision=None):
 def load_tokenizer(hf_id, revision=None, trust_remote_code=False):
     """(tokenizer, revision it was loaded from). Pythia models use config.PYTHIA_TOKENIZER_REVISION for every checkpoint
     (identical encodings; early pythia-2.8b revisions lack the special-token attributes). A missing pad token falls back
-    to eos (Llama / Qwen); without either the call fails here instead of deep inside the batching code."""
+    to eos (Llama-3); without either the call fails here instead of deep inside the batching code. Qwen3 tokenizers define
+    pad = <|endoftext|> (id 151643; = eos for the base models, eos = <|im_end|> for the post-trained ones) and add no BOS."""
     tok_revision = config.PYTHIA_TOKENIZER_REVISION if hf_id.startswith("EleutherAI/pythia") else revision
     tokenizer = AutoTokenizer.from_pretrained(hf_id, revision=tok_revision, trust_remote_code=trust_remote_code)
-    if tokenizer.pad_token is None:          # Pythia has <|padding|> (id 1); Llama/Qwen do not
+    if tokenizer.pad_token is None:          # Pythia has <|padding|> (id 1), Qwen3 <|endoftext|>; Llama-3 has none
         tokenizer.pad_token = tokenizer.eos_token
     if tokenizer.pad_token_id is None:
         raise ValueError(f"tokenizer of {hf_id}@{tok_revision or 'main'} defines neither a pad nor an eos token")
@@ -95,8 +120,8 @@ def load_model(name_or_hf_id, revision=None, device="auto", dtype=None, attn_imp
     """Loads (model, tokenizer) by registry short name (config.MODELS) or HF id, at `revision`.
 
     dtype / attn_impl default to the numerics policy for the model size and device
-    (float32 + eager for 160m/410m everywhere; float16 + sdpa from 1b on GPU). The model is in eval
-    mode, with `model.vh_info` holding what the extraction manifest records.
+    (float32 + eager for 160m/410m everywhere; float16 + sdpa from 1b on GPU; Qwen3: bfloat16 + sdpa on GPU, float32 +
+    eager on the CPU). The model is in eval mode, with `model.vh_info` holding what the extraction manifest records.
     """
     short, hf_id, _ = config.resolve_model(name_or_hf_id)
     device = resolve_device(device)
@@ -118,6 +143,7 @@ def load_model(name_or_hf_id, revision=None, device="auto", dtype=None, attn_imp
         "dtype": dtype_name(model.dtype), "attn_impl": model.config._attn_implementation,
         "device": device, "transformers": transformers.__version__, "torch": torch.__version__,
         "geometry": dict(zip(("layers", "heads", "head_dim"), model_geometry(model.config))),
+        "kv_heads": num_kv_heads(model.config), "hidden": model.config.hidden_size,
     }
     return model, tokenizer
 
@@ -153,3 +179,51 @@ def qkv_value_rows(model, layer, head):
     _, _, d = model_geometry(model.config)
     start = head * 3 * d + 2 * d
     return block.attention.query_key_value, slice(start, start + d)
+
+
+def v_proj_rows(model, layer, group):
+    """(v_proj Linear, row slice) of KV head `group` in a Llama-style separate `self_attn.v_proj` (Llama, Qwen, Yi).
+
+    v_proj maps hidden -> num_kv_heads * head_dim and its output is viewed as (..., num_kv_heads, head_dim), so KV head g
+    owns the rows [g * head_dim, (g + 1) * head_dim) (and the same bias entries, if the projection has a bias)."""
+    block = decoder_blocks(model)[layer]
+    attn = getattr(block, "self_attn", None)
+    if attn is None or not hasattr(attn, "v_proj"):
+        raise AttributeError(f"v_proj_rows needs a Llama-style self_attn.v_proj (block type {type(block).__name__})")
+    _, _, d = model_geometry(model.config)
+    if not 0 <= group < num_kv_heads(model.config):
+        raise ValueError(f"KV group {group} out of range for {num_kv_heads(model.config)} KV heads")
+    return attn.v_proj, slice(group * d, (group + 1) * d)
+
+
+def q_proj_rows(model, layer, head):
+    """(q_proj Linear, row slice) of query head `head` in a Llama-style separate `self_attn.q_proj`, or None for other
+    blocks (GPT-NeoX). q_proj maps hidden -> num_heads * head_dim, viewed as (..., num_heads, head_dim)."""
+    block = decoder_blocks(model)[layer]
+    attn = getattr(block, "self_attn", None)
+    if attn is None or not hasattr(attn, "q_proj"):
+        return None
+    _, num_heads, d = model_geometry(model.config)
+    if not 0 <= head < num_heads:
+        raise ValueError(f"head {head} out of range for {num_heads} heads")
+    return attn.q_proj, slice(head * d, (head + 1) * d)
+
+
+def value_rows(model, layer, head):
+    """(Linear, row slice, query heads, KV group) for the self-test that zeroes the values read by query head `head`.
+
+    GPT-NeoX (fused query_key_value, one KV head per query head): the rows of qkv_value_rows, affecting [head] only,
+    KV group None. Llama-style (GQA or not): the v_proj rows of KV group g = head // n_rep, which every query head of
+    that group reads, so their o_proj-input slices (kv_group_heads) must all become zero while the other heads of the
+    layer stay bit-identical.
+    """
+    block = decoder_blocks(model)[layer]
+    if hasattr(block, "attention") and hasattr(block.attention, "query_key_value"):
+        linear, rows = qkv_value_rows(model, layer, head)
+        return linear, rows, [head], None
+    _, num_heads, _ = model_geometry(model.config)
+    if not 0 <= head < num_heads:
+        raise ValueError(f"head {head} out of range for {num_heads} heads")
+    group = head // (num_heads // num_kv_heads(model.config))
+    linear, rows = v_proj_rows(model, layer, group)
+    return linear, rows, kv_group_heads(model.config, group), group
