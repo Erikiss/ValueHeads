@@ -34,6 +34,10 @@ def test_v_rows_zero_exactly_one_head_slice(model_tok):
     assert tol == 1e-2 and res["tolerance_batched_vs_single"] == tol
     assert res["batch_row0_vs_single_maxdiff"] < tol
     assert res["batch_row1_padded_vs_single_maxdiff"] < tol
+    # the gate is scale-relative (fp32: 1e-2 of the per-layer activation maximum)
+    assert res["dtype"] == "float32" and res["tolerance_rel_batched_vs_single"] == 1e-2
+    assert res["batch_row0_vs_single_maxrel"] < 1e-2 and res["batch_row1_padded_vs_single_maxrel"] < 1e-2
+    assert res["batch_consistent"] and res["activation_scale_max"] > 0
     assert res["pad_count_row1"] > 0
     assert res["ok"], res
     # a ~300-token text used to exceed the old 1e-3 criterion although the layout is correct
@@ -136,3 +140,22 @@ def test_forbidden_numerics(bad):
     assert config.dtype_policy("pythia-160m", "cuda") == ("float32", "eager")
     assert config.dtype_policy("pythia-1b", "cuda:0") == ("float16", "sdpa")
     assert config.dtype_policy("pythia-2.8b", "cpu") == ("float32", "eager")
+
+
+def test_batch_consistency_is_scale_relative():
+    """fp16 on the large models: absolute differences of ~0.3 at an activation scale of ~100 are kernel numerics
+    (rel 3e-3, passes); the same absolute difference at scale 1 is a layout-sized error (rel 0.3, fails)."""
+    import torch
+    from valueheads_pythia.commands.selftest import batch_consistency
+    g = torch.Generator().manual_seed(0)
+    base = torch.randn(4, 8, generator=g) * 100.0
+    short = torch.randn(4, 8, generator=g) * 100.0
+    noise = torch.randn(4, 8, generator=g) * 0.1          # |noise| <= ~0.3
+    res = batch_consistency(base, torch.stack([base + noise, short + noise]), short, "float16")
+    assert res["tolerance_rel_batched_vs_single"] == 5e-2 and res["batch_consistent"], res
+    assert res["batch_row0_vs_single_maxrel"] < 1e-2 and res["activation_scale_max"] > 100
+    small_base, small_short = base / 100.0, short / 100.0
+    res = batch_consistency(small_base, torch.stack([small_base + noise, small_short + noise]), small_short, "float16")
+    assert not res["batch_consistent"] and res["batch_row0_vs_single_maxrel"] > 5e-2
+    res = batch_consistency(base, torch.stack([base, short]), short, "float32")
+    assert res["batch_consistent"] and res["batch_row0_vs_single_maxdiff"] == 0.0

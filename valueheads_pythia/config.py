@@ -154,6 +154,11 @@ DTYPE_POLICY = {
     # activations, length dependent (2.8e-3 at ~300 tokens even for a batch of identical rows); the selftest / layout
     # test use this absolute tolerance, not 1e-3 (DESIGN 3.1: "Tests mit Toleranz 1e-2, nicht 1e-5")
     "tolerance_batched_vs_single": 1e-2,
+    # the same comparison relative to the per-layer activation scale (max |single-text activation| of the layer), which
+    # is what the selftest gates on: a layout / padding error changes activations by O(1) relative, kernel numerics by
+    # <= 1e-2 (fp32 eager) and a few 1e-2 at most (fp16 / bf16 sdpa, where batched and single runs take different kernels
+    # and the absolute difference scales with the activation magnitude of the large models)
+    "tolerance_rel_batched_vs_single": {"float32": 1e-2, "float16": 5e-2, "bfloat16": 5e-2},
 }
 
 

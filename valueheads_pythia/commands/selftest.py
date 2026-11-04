@@ -83,20 +83,41 @@ def check_hook_layout(model, tokenizer, layer=5, head=7):
     with coll:
         both = coll.collect(batch.input_ids, batch.attention_mask)
         single_short = coll.collect(tokenizer(SHORT, return_tensors="pt").input_ids)[0]
-    res["batch_row0_vs_single_maxdiff"] = float((both[0] - base).abs().max())
-    res["batch_row1_padded_vs_single_maxdiff"] = float((both[1] - single_short).abs().max())
+    res.update(batch_consistency(base, both, single_short, str(model.dtype).replace("torch.", "")))
     res["pad_count_row1"] = int((batch.attention_mask[1] == 0).sum())
     res["o_proj_module"] = type(o_proj(model, layer)).__name__
-    # batched-vs-single differences are kernel numerics (length dependent, up to ~3e-3 at 300 tokens in fp32), not a
-    # layout error: the policy tolerance of DESIGN 3.1 (1e-2) applies, the layout itself is checked exactly above
-    tol = config.DTYPE_POLICY["tolerance_batched_vs_single"]
-    res["tolerance_batched_vs_single"] = tol
     res["ok"] = (res["hook_input_width"] == H * D and res["zeroed_head_absmax"] == 0.0
                  and res["other_heads_same_layer_maxdiff"] == 0.0 and res["earlier_layers_maxdiff"] == 0.0
                  and (res["later_layer_maxdiff"] or 0) > 0 and res["base_head_absmax"] > 0
-                 and res["batch_row0_vs_single_maxdiff"] < tol and res["batch_row1_padded_vs_single_maxdiff"] < tol
-                 and res["pad_count_row1"] > 0)
+                 and res["batch_consistent"] and res["pad_count_row1"] > 0)
     return res
+
+
+def batch_consistency(base, both, single_short, dtype_name):
+    """Batched (right-padded, batch > 1) vs single-text hook inputs: absolute and scale-relative differences.
+
+    base / single_short: (L, H*D) single-text activations of the long and the short text; both: (2, L, H*D) from the
+    padded batch [long, short]. Batched and single runs take different GEMM / attention kernels, so they differ by
+    numerics that scale with the activation magnitude (large in the big Pythia models, fp16 on GPU); a layout or
+    padding error changes the activations by O(1) relative. The gate is therefore the per-layer maximum of
+    max|batch - single| / max|single| against DTYPE_POLICY["tolerance_rel_batched_vs_single"][dtype] (DESIGN 3.1
+    [korr.]); the absolute values are reported for reference.
+    """
+
+    def per_layer(a, b):
+        diff = (a - b).abs().amax(dim=1)                       # (L,)
+        scale = b.abs().amax(dim=1).clamp(min=1e-6)
+        rel = diff / scale
+        return float(diff.max()), float(rel.max()), int(rel.argmax()), float(scale.max())
+
+    d0, r0, l0, s0 = per_layer(both[0], base)
+    d1, r1, l1, s1 = per_layer(both[1], single_short)
+    tol_rel = config.DTYPE_POLICY["tolerance_rel_batched_vs_single"].get(dtype_name, config.DTYPE_POLICY["tolerance_rel_batched_vs_single"]["float32"])
+    return {"batch_row0_vs_single_maxdiff": d0, "batch_row0_vs_single_maxrel": r0, "batch_row0_maxrel_layer": l0,
+            "batch_row1_padded_vs_single_maxdiff": d1, "batch_row1_padded_vs_single_maxrel": r1, "batch_row1_maxrel_layer": l1,
+            "activation_scale_max": max(s0, s1), "dtype": dtype_name,
+            "tolerance_batched_vs_single": config.DTYPE_POLICY["tolerance_batched_vs_single"],
+            "tolerance_rel_batched_vs_single": tol_rel, "batch_consistent": bool(r0 < tol_rel and r1 < tol_rel)}
 
 
 # ----------------------------------------------------------------------------- mask positions
