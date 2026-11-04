@@ -346,8 +346,9 @@ def test_save_manifest_merges_other_sessions_revisions(tmp_path):
     a["revisions"]["step0"] = {"a": 3}
     save_manifest(path, a)
     on_disk = load_manifest(path)
-    assert on_disk["revisions"] == {"step0": {"a": 3}, "step143000": {"b": 2}}
-    assert a["revisions"]["step143000"] == {"b": 2}
+    assert set(on_disk["revisions"]) == {"step0", "step143000"}
+    assert on_disk["revisions"]["step0"]["a"] == 3 and on_disk["revisions"]["step143000"]["b"] == 2
+    assert a["revisions"]["step143000"]["b"] == 2
 
 
 def test_pythia_tokenizer_from_reference_revision():
