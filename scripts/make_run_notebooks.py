@@ -92,6 +92,9 @@ def build(name, spec, model_override=None):
         if cell["cell_type"] == "code":
             compile(src(cell), name, "exec")
             cell["outputs"], cell["execution_count"] = [], None
+    # Colab proposes this runtime on connect (the master keeps T4 as the entry-level default)
+    nb.setdefault("metadata", {}).setdefault("colab", {})["gpuType"] = spec.get("gpu", "A100")
+    nb["metadata"]["accelerator"] = "GPU"
     return nb
 
 
