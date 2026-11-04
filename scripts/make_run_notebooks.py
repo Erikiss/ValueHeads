@@ -31,6 +31,7 @@ RUNS = {
     "pythia-2.8b-sweep": dict(model="pythia-2.8b", root="pythia-2.8b", revisions=OTHERS, no_causal=True, sweep_only=True),
     # "lite" variants (2026-11-04): probing only, three values, no likelihood evaluation / generation / judge. They write into
     # the same Drive folders, so finished results are kept and skipped; started in place of the full notebook to save CU.
+    "pythia-410m-lite": dict(model="pythia-410m", root="pythia-410m", no_causal=True, drop=("9", "10")),   # all 7 values
     "pythia-1b-lite": dict(model="pythia-1b", root="pythia-1b", values=LITE_VALUES, no_causal=True, drop=("9", "10")),
     "pythia-1.4b-lite": dict(model="pythia-1.4b", root="pythia-1.4b", values=LITE_VALUES, no_causal=True, drop=("9", "10")),
     "pythia-2.8b-sweep-lite": dict(model="pythia-2.8b", root="pythia-2.8b", revisions=OTHERS, values=LITE_VALUES, no_causal=True,
@@ -65,7 +66,7 @@ def build(name, spec, model_override=None):
               f"MODEL `{model}`, Drive-Ordner `MyDrive/ValueHeadsPythia/{spec['root']}`"
               + (f", Checkpoints `{' '.join(spec['revisions'])}`" if spec.get("revisions") else "")
               + (", nur Sweep (Zellen 1-5, 11; Evals und Einzel-Checkpoint-Zellen im Causal-Teil)" if spec.get("sweep_only") else "")
-              + (f", Werte `{' '.join(spec['values'])}`" if spec.get("values") else "")
+              + (f", Werte `{' '.join(spec['values'])}`" if spec.get("values") else (", alle 7 Werte" if spec.get("drop") else ""))
               + (", ohne Likelihood-Evaluation und Generation/Judge (Abschnitte 9 und 10 entfernt)" if spec.get("drop") else "")
               + ". Laufzeit: A100 (Colab Pro+), alle Zellen ausführen.\n\n")
     set_src(cells[0], banner + src(cells[0]))
@@ -81,7 +82,7 @@ def build(name, spec, model_override=None):
                  "REVISIONS = " + json.dumps(spec["revisions"]) + "   # run subset of config.CHECKPOINTS_DEFAULT")
     if spec.get("no_causal"):
         c = sub1(c, r"^CAUSAL_REVISIONS = \[r for r in CAUSAL_REVISIONS if r in REVISIONS\] or REVISIONS\[-1:\]",
-                 "CAUSAL_REVISIONS = []                 # " + ("lite run: no likelihood evaluation" if spec.get("values")
+                 "CAUSAL_REVISIONS = []                 # " + ("lite run: no likelihood evaluation" if (spec.get("values") or spec.get("drop"))
                                                                  else "sweep part: the likelihood evals run in the causal part"))
     if spec.get("sweep_only"):
         c = sub1(c, r"^NB_REVISIONS = \[FINAL_REVISION\]", "NB_REVISIONS = []                     # sweep part: no single-checkpoint cells")
