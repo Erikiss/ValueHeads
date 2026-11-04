@@ -132,7 +132,7 @@ def extract_features(model, tokenizer, texts, out_dir, batch_size=16, max_length
         "transformers": info.get("transformers"), "torch": info.get("torch"),
         "model": info.get("model"), "hf_id": info.get("hf_id"), "revision": info.get("revision"),
         "commit_sha": info.get("commit_sha"), "dtype": info.get("dtype"), "attn_impl": info.get("attn_impl"),
-        "device": str(model.device), "pad_token_id": tokenizer.pad_token_id,
+        "device": str(model.device), "pad_token_id": tokenizer.pad_token_id, "tokenizer_revision": info.get("tokenizer_revision"),
         "label_sets": sorted(labels) if isinstance(labels, dict) else (["labels"] if labels is not None else []),
         "has_groups": groups is not None,
     }

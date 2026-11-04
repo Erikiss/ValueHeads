@@ -308,6 +308,11 @@ Notebook im `SMOKE`-Modus ≈ 3-5 min.
 
 ## Grenzen (nicht implementiert oder hier nicht ausführbar)
 
+- **Tokenizer der frühen pythia-2.8b-Checkpoints**: Die Tokenizer-Dateien von pythia-2.8b step0 bis step16000 tragen unter
+  transformers 5 keine Sondertoken (pad/eos/bos = None), die Kodierung ist aber identisch mit step143000 (geprüft für alle
+  5 Modelle × 12 Checkpoints). Pythia-Tokenizer werden deshalb immer von `step143000` geladen
+  (`config.PYTHIA_TOKENIZER_REVISION`, im Extraktions-Manifest als `tokenizer_revision`). Ein Sweep vor diesem Fix
+  (2026-11-04) hat diese Checkpoints mit `TypeError: full() ...` übersprungen; ein erneuter Lauf holt sie nach.
 - **GPU-Pfad nur teilweise nachgewiesen**: Tests, Smoke-Kette und Notebook-Smoke liefen auf CPU. Der erste Colab-Lauf auf
   einer T4 (2026-11-04) fand einen Device-Fehler im Selftest (Token-IDs blieben auf der CPU; behoben). Alle anderen
   Forward-Pfade (`ActivationCollector.collect`, Likelihood-Evals, Generation, Hooks, Judges) verschieben ihre Eingaben

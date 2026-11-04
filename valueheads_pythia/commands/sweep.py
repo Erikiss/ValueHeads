@@ -235,6 +235,7 @@ def split_tables_exist(args, p, short, revision, value):
 def run_revision(args, p, short, hf_id, revision, values, tier, B, P, manifest):
     """All steps of one revision; records timings and the extraction manifest into `manifest`."""
     entry = manifest["revisions"].setdefault(revision, {})
+    entry.pop("error", None)                 # a retried revision drops the error of an earlier run (re-set if it fails again)
     timings = entry.setdefault("timings", {})
     done = set(entry.get("done", []))
     for value in values:

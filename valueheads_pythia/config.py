@@ -33,6 +33,11 @@ CHECKPOINTS_DEFAULT = ["step0", "step128", "step512", "step1000", "step2000", "s
 CHECKPOINTS_CACHED_LOCALLY_160M = ["step0", "step2000", "step98000", "step99000", "step143000"]
 CHECKPOINTS_SMOKE = ["step0", "step2000", "step143000"]
 CAUSAL_CHECKPOINTS_DEFAULT = ["step2000", "step16000", "step143000"]
+# All Pythia checkpoints share one tokenizer (GPT-NeoX-20B BPE). The tokenizer files of pythia-2.8b step0..step16000 lack
+# the special-token attributes under transformers 5 (pad / eos / bos = None) although their encodings are identical to
+# step143000 (checked for all 5 models x 12 default checkpoints, with and without special tokens); the tokenizer is
+# therefore always loaded from this revision for EleutherAI/pythia-* models (models.load_tokenizer).
+PYTHIA_TOKENIZER_REVISION = "step143000"
 
 # ----------------------------------------------------------------------------- values
 # Paper order (data.py:16 of the reference repo); `harmless` there is the pooled HH-RLHF set.

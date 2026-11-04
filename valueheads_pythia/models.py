@@ -77,6 +77,19 @@ def resolve_commit_sha(hf_id, revision=None):
         return None
 
 
+def load_tokenizer(hf_id, revision=None, trust_remote_code=False):
+    """(tokenizer, revision it was loaded from). Pythia models use config.PYTHIA_TOKENIZER_REVISION for every checkpoint
+    (identical encodings; early pythia-2.8b revisions lack the special-token attributes). A missing pad token falls back
+    to eos (Llama / Qwen); without either the call fails here instead of deep inside the batching code."""
+    tok_revision = config.PYTHIA_TOKENIZER_REVISION if hf_id.startswith("EleutherAI/pythia") else revision
+    tokenizer = AutoTokenizer.from_pretrained(hf_id, revision=tok_revision, trust_remote_code=trust_remote_code)
+    if tokenizer.pad_token is None:          # Pythia has <|padding|> (id 1); Llama/Qwen do not
+        tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token_id is None:
+        raise ValueError(f"tokenizer of {hf_id}@{tok_revision or 'main'} defines neither a pad nor an eos token")
+    return tokenizer, tok_revision
+
+
 def load_model(name_or_hf_id, revision=None, device="auto", dtype=None, attn_impl=None, allow_unsafe=False,
                trust_remote_code=False):
     """Loads (model, tokenizer) by registry short name (config.MODELS) or HF id, at `revision`.
@@ -93,17 +106,14 @@ def load_model(name_or_hf_id, revision=None, device="auto", dtype=None, attn_imp
         attn_impl = policy_impl if dtype_name(dtype) == policy_dtype else config.DTYPE_POLICY["attn_impl_for_dtype"][dtype_name(dtype)]
     check_numerics(dtype, attn_impl, allow_unsafe)
 
-    tok_kwargs = dict(revision=revision, trust_remote_code=trust_remote_code)
-    tokenizer = AutoTokenizer.from_pretrained(hf_id, **tok_kwargs)
+    tokenizer, tok_revision = load_tokenizer(hf_id, revision, trust_remote_code)
     model = AutoModelForCausalLM.from_pretrained(
         hf_id, revision=revision, dtype=dtype, attn_implementation=attn_impl, trust_remote_code=trust_remote_code,
     ).eval()
     model.to(device)
-    if tokenizer.pad_token is None:          # Pythia has <|padding|> (id 1); Llama/Qwen do not
-        tokenizer.pad_token = tokenizer.eos_token
     model.generation_config.pad_token_id = tokenizer.pad_token_id
     model.vh_info = {
-        "model": short, "hf_id": hf_id, "revision": revision or "main",
+        "model": short, "hf_id": hf_id, "revision": revision or "main", "tokenizer_revision": tok_revision or "main",
         "commit_sha": getattr(model.config, "_commit_hash", None) or resolve_commit_sha(hf_id, revision),
         "dtype": dtype_name(model.dtype), "attn_impl": model.config._attn_implementation,
         "device": device, "transformers": transformers.__version__, "torch": torch.__version__,

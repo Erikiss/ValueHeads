@@ -348,3 +348,28 @@ def test_save_manifest_merges_other_sessions_revisions(tmp_path):
     on_disk = load_manifest(path)
     assert on_disk["revisions"] == {"step0": {"a": 3}, "step143000": {"b": 2}}
     assert a["revisions"]["step143000"] == {"b": 2}
+
+
+def test_pythia_tokenizer_from_reference_revision():
+    """pythia-2.8b step0..step16000 ship tokenizer files without special-token attributes (pad / eos None under
+    transformers 5); load_tokenizer takes the Pythia reference revision, whose encodings are identical."""
+    from transformers import AutoTokenizer
+    from valueheads_pythia import config
+    from valueheads_pythia.models import load_tokenizer
+    raw = AutoTokenizer.from_pretrained("EleutherAI/pythia-2.8b", revision="step0")
+    assert raw.pad_token_id is None and raw.eos_token_id is None
+    tok, rev = load_tokenizer("EleutherAI/pythia-2.8b", "step0")
+    assert rev == config.PYTHIA_TOKENIZER_REVISION and tok.pad_token_id == 1 and tok.eos_token_id == 0
+    text = "Question: Is it safe?\nAnswer: No.  café 東京"
+    assert tok(text)["input_ids"] == raw(text)["input_ids"]
+
+
+def test_sweep_retry_clears_old_error(tmp_path, monkeypatch):
+    """A revision that failed in an earlier sweep run loses its error entry when it is retried."""
+    import types
+    from valueheads_pythia.commands import sweep
+    manifest = {"revisions": {"step0": {"timings": {}, "error": "TypeError: full() ..."}}}
+    args = types.SimpleNamespace(force=False, eval_revisions=[], cleanup_cache=False, cleanup_features=False, split_seeds=[])
+    monkeypatch.setattr(sweep, "save_manifest", lambda path, m: None)
+    sweep.run_revision(args, {"manifest": str(tmp_path / "m.json")}, "pythia-160m", "EleutherAI/pythia-160m", "step0", [], "smoke", 10, 2, manifest)
+    assert "error" not in manifest["revisions"]["step0"]
