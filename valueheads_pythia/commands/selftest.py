@@ -5,6 +5,7 @@
 The check functions are also what tests/test_hook_layout.py, tests/test_mask_positions.py and
 tests/test_data_counts.py assert on.
 """
+import contextlib
 import sys
 import time
 
@@ -73,17 +74,28 @@ def check_hook_layout(model, tokenizer, layer=5, head=7):
         "later_layer_maxdiff": float((zeroed[layer + 1] - base[layer + 1]).abs().max()) if layer + 1 < L else None,
         "base_head_absmax": float(base[layer, sl].abs().max()),
     }
-    # batched right padding vs single texts
-    old_side = tokenizer.padding_side
-    tokenizer.padding_side = "right"
-    try:
-        batch = tokenizer([TEXT, SHORT], return_tensors="pt", padding=True)
-    finally:
-        tokenizer.padding_side = old_side
-    with coll:
-        both = coll.collect(batch.input_ids, batch.attention_mask)
-        single_short = coll.collect(tokenizer(SHORT, return_tensors="pt").input_ids)[0]
-    res.update(batch_consistency(base, both, single_short, str(model.dtype).replace("torch.", "")))
+    # batched right padding vs single texts: the layout gate runs in fp32 (lossless up-cast of half-precision models),
+    # the native dtype is reported and only sanity-gated (fp16 rounding noise of the large models, DESIGN 3.1 [korr.])
+    native = str(model.dtype).replace("torch.", "")
+    long_n, both_n, short_n, batch = collect_batch_vs_single(model, tokenizer, coll)
+    res.update({f"{k}_native": v for k, v in batch_consistency(long_n, both_n, short_n).items()})
+    res["batch_row0_vs_single_maxdiff"] = res.pop("maxabs_row0_native")
+    res["batch_row1_padded_vs_single_maxdiff"] = res.pop("maxabs_row1_native")
+    res["dtype"] = native
+    if model.dtype != torch.float32:
+        with fp32_upcast(model):
+            long_f, both_f, short_f, _ = collect_batch_vs_single(model, tokenizer, coll)
+        layout = batch_consistency(long_f, both_f, short_f)
+    else:
+        layout = {k: res[f"{k}_native"] for k in ("normrel_row0", "normrel_row1", "normrel_layer", "finite")}
+    res.update({f"layout_fp32_{k}": layout[k] for k in ("normrel_row0", "normrel_row1", "normrel_layer")})
+    tol = config.DTYPE_POLICY["tolerance_layout_normrel_fp32"]
+    sanity = config.DTYPE_POLICY["sanity_normrel_half_precision"]
+    res["tolerance_layout_normrel_fp32"] = tol
+    res["tolerance_batched_vs_single"] = config.DTYPE_POLICY["tolerance_batched_vs_single"]   # fp32 absolute (reference)
+    res["batch_layout_ok"] = bool(layout["finite"] and max(layout["normrel_row0"], layout["normrel_row1"]) < tol)
+    res["batch_native_sane"] = bool(res["finite_native"] and max(res["normrel_row0_native"], res["normrel_row1_native"]) < (tol if native == "float32" else sanity))
+    res["batch_consistent"] = res["batch_layout_ok"] and res["batch_native_sane"]
     res["pad_count_row1"] = int((batch.attention_mask[1] == 0).sum())
     res["o_proj_module"] = type(o_proj(model, layer)).__name__
     res["ok"] = (res["hook_input_width"] == H * D and res["zeroed_head_absmax"] == 0.0
@@ -93,31 +105,56 @@ def check_hook_layout(model, tokenizer, layer=5, head=7):
     return res
 
 
-def batch_consistency(base, both, single_short, dtype_name):
-    """Batched (right-padded, batch > 1) vs single-text hook inputs: absolute and scale-relative differences.
+@contextlib.contextmanager
+def fp32_upcast(model):
+    """Temporarily casts a half-precision model to fp32 and restores it exactly: every parameter returns to its own
+    dtype (fp16 -> fp32 -> fp16 is lossless) and every buffer to its original tensor (e.g. the fp32 rotary inv_freq,
+    which a plain model.to(fp16) would round)."""
+    param_dtypes = {n: p.dtype for n, p in model.named_parameters()}
+    buffers = dict(model.named_buffers())
+    model.float()
+    try:
+        yield model
+    finally:
+        for n, p in model.named_parameters():
+            if p.dtype != param_dtypes[n]:
+                p.data = p.data.to(param_dtypes[n])
+        for n, b in buffers.items():
+            mod_name, _, attr = n.rpartition(".")
+            (model.get_submodule(mod_name) if mod_name else model)._buffers[attr] = b
 
-    base / single_short: (L, H*D) single-text activations of the long and the short text; both: (2, L, H*D) from the
-    padded batch [long, short]. Batched and single runs take different GEMM / attention kernels, so they differ by
-    numerics that scale with the activation magnitude (large in the big Pythia models, fp16 on GPU); a layout or
-    padding error changes the activations by O(1) relative. The gate is therefore the per-layer maximum of
-    max|batch - single| / max|single| against DTYPE_POLICY["tolerance_rel_batched_vs_single"][dtype] (DESIGN 3.1
-    [korr.]); the absolute values are reported for reference.
+
+def collect_batch_vs_single(model, tokenizer, coll):
+    """Hook inputs (L, H*D) of TEXT and SHORT collected singly and as one right-padded batch [TEXT, SHORT]."""
+    old_side = tokenizer.padding_side
+    tokenizer.padding_side = "right"
+    try:
+        batch = tokenizer([TEXT, SHORT], return_tensors="pt", padding=True)
+    finally:
+        tokenizer.padding_side = old_side
+    with coll:
+        long_ = coll.collect(tokenizer(TEXT, return_tensors="pt").input_ids)[0].float()
+        both = coll.collect(batch.input_ids, batch.attention_mask).float()
+        short = coll.collect(tokenizer(SHORT, return_tensors="pt").input_ids)[0].float()
+    return long_, both, short, batch
+
+
+def batch_consistency(long_, both, short):
+    """Per-layer relative L2 error of the batched rows against the single texts.
+
+    long_ / short: (L, H*D) single-text hook inputs; both: (2, L, H*D) of the right-padded batch [long, short]. A layout
+    or padding error (activation of another position) gives a relative error of order 1 (>= 0.82 measured on
+    pythia-2.8b), kernel numerics far less in fp32. Returns the worst layer's errors, its index, the max-abs
+    differences (reference only) and whether all values are finite.
     """
+    def rel(a, b):
+        return (a - b).norm(dim=1) / b.norm(dim=1).clamp(min=1e-6)
 
-    def per_layer(a, b):
-        diff = (a - b).abs().amax(dim=1)                       # (L,)
-        scale = b.abs().amax(dim=1).clamp(min=1e-6)
-        rel = diff / scale
-        return float(diff.max()), float(rel.max()), int(rel.argmax()), float(scale.max())
-
-    d0, r0, l0, s0 = per_layer(both[0], base)
-    d1, r1, l1, s1 = per_layer(both[1], single_short)
-    tol_rel = config.DTYPE_POLICY["tolerance_rel_batched_vs_single"].get(dtype_name, config.DTYPE_POLICY["tolerance_rel_batched_vs_single"]["float32"])
-    return {"batch_row0_vs_single_maxdiff": d0, "batch_row0_vs_single_maxrel": r0, "batch_row0_maxrel_layer": l0,
-            "batch_row1_padded_vs_single_maxdiff": d1, "batch_row1_padded_vs_single_maxrel": r1, "batch_row1_maxrel_layer": l1,
-            "activation_scale_max": max(s0, s1), "dtype": dtype_name,
-            "tolerance_batched_vs_single": config.DTYPE_POLICY["tolerance_batched_vs_single"],
-            "tolerance_rel_batched_vs_single": tol_rel, "batch_consistent": bool(r0 < tol_rel and r1 < tol_rel)}
+    r0, r1 = rel(both[0], long_), rel(both[1], short)
+    finite = bool(torch.isfinite(both).all() and torch.isfinite(long_).all() and torch.isfinite(short).all())
+    return {"normrel_row0": float(r0.max()), "normrel_row1": float(r1.max()), "normrel_layer": int(torch.maximum(r0, r1).argmax()),
+            "maxabs_row0": float((both[0] - long_).abs().max()), "maxabs_row1": float((both[1] - short).abs().max()),
+            "finite": finite}
 
 
 # ----------------------------------------------------------------------------- mask positions

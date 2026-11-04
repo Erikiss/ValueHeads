@@ -28,7 +28,7 @@ Die verbindliche Spezifikation ist `DESIGN.md` (Abschnittsnummern unten beziehen
 
 Ja, machbar. Die Lokalisierung ist modellagnostisch und läuft auf Pythia nach einem einzigen Pfadwechsel; das
 Head-Layout am Hook ist numerisch exakt verifiziert (Abweichung 0.0 für alle 12 × 12 Heads von pythia-160m in fp32/eager,
-mit Right-Padding, und KV-Cache-Decode gegen Full-Recompute innerhalb der Policy-Toleranz (fp32 absolut 1e-2; Batch gegen Einzeltext relativ zur Aktivierungsskala je Layer: fp32 1e-2, fp16/bf16 5e-2) – `selftest` und
+mit Right-Padding, und KV-Cache-Decode gegen Full-Recompute innerhalb der Policy-Toleranz (KV-Cache 1e-2 absolut; Batch gegen Einzeltext als relativer L2-Fehler je Layer, immer in fp32 geprüft, Schwelle 1e-2; fp16/bf16-Modelle werden dafür verlustfrei hochgecastet) – `selftest` und
 `tests/test_hook_layout.py`; die bf16/fp16- und sdpa-Varianten stammen aus dem Design-Track, DESIGN 3.1, und sind auf dieser
 CPU-Box nicht nachgerechnet). Die Causal-Schritte 3-4 des Papers
 (Maskieren/Steuern + LLM-Judge auf frei generierten Antworten) sind für **Base-Modelle nur eingeschränkt sinnvoll**: das
@@ -292,7 +292,7 @@ Notebook im `SMOKE`-Modus ≈ 3-5 min.
 | Base-Modelle: keine Verweigerung, kein Instruktionsfolgen; "Harmlessness-Heads" im Paper-Sinn existieren nicht | Harmlessness nur als Paarpräferenz (`harmless-base`); Begriff "wert-korrelierte Merkmalsdetektoren" |
 | Paper-"Harmlessness"-Set ist zu 75 % Helpfulness-Präferenz | `harmless-base` + `helpful-base` getrennt; gepoolt nur im `paper`-Modus |
 | coherence 97.9 % positiv (16 Val-Negative) | AUC, balanced class_weight, `coherence_strict`, Train+Val-CV; ggf. "nicht schätzbar" |
-| Numerik: bf16/fp16-eager verfälscht Head-Outputs ab Layer 4 / NaN ab Layer 5; batched vs. einzeln weicht in fp32 längenabhängig bis ~3e-3 ab, in fp16/sdpa bei pythia-2.8b absolut ~0.3 bei großer Aktivierungsskala (A100-Lauf 2026-11-04), daher gated der Selftest relativ zur Skala je Layer (Kernel-Numerik) | Policy 3.1, `manifest.json`, Tests und `selftest` mit Toleranz 1e-2 (`DTYPE_POLICY["tolerance_batched_vs_single"]`), Features verschiedener dtypes nie mischen |
+| Numerik: bf16/fp16-eager verfälscht Head-Outputs ab Layer 4 / NaN ab Layer 5; batched vs. einzeln weicht in fp32 längenabhängig bis ~3e-3 ab; **fp16 bei pythia-2.8b**: Hook-Inputs weichen schon beim Einzeltext in Layer 24-31 um 5-16 % (relativer L2-Fehler) von fp32 ab, Layer 0-23 unter 1 % (CPU-Messung step100000, 2026-11-04); auf der A100 lag Batch gegen Einzeltext absolut bei 0,13 / 0,31 (Kernel-Numerik) | Policy 3.1, `manifest.json`, Tests und `selftest` mit Toleranz 1e-2 (`DTYPE_POLICY["tolerance_batched_vs_single"]`), Features verschiedener dtypes nie mischen |
 | Repo-Hooks editieren nur das letzte Token | `positions="all"` für Likelihood-Evals (`test_mask_positions.py`) |
 | Causal-Eval-Kosten übersteigen die Extraktion | reduzierte Suite, R = 20, nur 3 Checkpoints; A100 für 2.8b |
 | T4-Durchsatz ist Annahme, nicht gemessen | Auto-Rekalibrierung; `max_samples` so, dass ein Checkpoint ≤ 45 min dauert |

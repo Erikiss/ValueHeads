@@ -34,10 +34,10 @@ def test_v_rows_zero_exactly_one_head_slice(model_tok):
     assert tol == 1e-2 and res["tolerance_batched_vs_single"] == tol
     assert res["batch_row0_vs_single_maxdiff"] < tol
     assert res["batch_row1_padded_vs_single_maxdiff"] < tol
-    # the gate is scale-relative (fp32: 1e-2 of the per-layer activation maximum)
-    assert res["dtype"] == "float32" and res["tolerance_rel_batched_vs_single"] == 1e-2
-    assert res["batch_row0_vs_single_maxrel"] < 1e-2 and res["batch_row1_padded_vs_single_maxrel"] < 1e-2
-    assert res["batch_consistent"] and res["activation_scale_max"] > 0
+    # the gate is the per-layer relative L2 error in fp32 (DESIGN 3.1 [korr. 2026-11-04])
+    assert res["dtype"] == "float32" and res["tolerance_layout_normrel_fp32"] == 1e-2
+    assert res["layout_fp32_normrel_row0"] < 1e-2 and res["layout_fp32_normrel_row1"] < 1e-2
+    assert res["batch_layout_ok"] and res["batch_native_sane"] and res["batch_consistent"]
     assert res["pad_count_row1"] > 0
     assert res["ok"], res
     # a ~300-token text used to exceed the old 1e-3 criterion although the layout is correct
@@ -142,20 +142,40 @@ def test_forbidden_numerics(bad):
     assert config.dtype_policy("pythia-2.8b", "cpu") == ("float32", "eager")
 
 
-def test_batch_consistency_is_scale_relative():
-    """fp16 on the large models: absolute differences of ~0.3 at an activation scale of ~100 are kernel numerics
-    (rel 3e-3, passes); the same absolute difference at scale 1 is a layout-sized error (rel 0.3, fails)."""
+def test_batch_consistency_separates_noise_from_layout_errors():
+    """Relative L2 error per layer: rounding-sized noise stays small, the activation of another token is O(1)."""
     import torch
     from valueheads_pythia.commands.selftest import batch_consistency
     g = torch.Generator().manual_seed(0)
-    base = torch.randn(4, 8, generator=g) * 100.0
-    short = torch.randn(4, 8, generator=g) * 100.0
-    noise = torch.randn(4, 8, generator=g) * 0.1          # |noise| <= ~0.3
-    res = batch_consistency(base, torch.stack([base + noise, short + noise]), short, "float16")
-    assert res["tolerance_rel_batched_vs_single"] == 5e-2 and res["batch_consistent"], res
-    assert res["batch_row0_vs_single_maxrel"] < 1e-2 and res["activation_scale_max"] > 100
-    small_base, small_short = base / 100.0, short / 100.0
-    res = batch_consistency(small_base, torch.stack([small_base + noise, small_short + noise]), small_short, "float16")
-    assert not res["batch_consistent"] and res["batch_row0_vs_single_maxrel"] > 5e-2
-    res = batch_consistency(base, torch.stack([base, short]), short, "float32")
-    assert res["batch_consistent"] and res["batch_row0_vs_single_maxdiff"] == 0.0
+    long_, short = torch.randn(6, 64, generator=g) * 50.0, torch.randn(6, 64, generator=g) * 50.0
+    noise = torch.randn(6, 64, generator=g) * 0.5                      # 1 % relative
+    res = batch_consistency(long_, torch.stack([long_ + noise, short + noise]), short)
+    assert res["finite"] and 5e-3 < res["normrel_row1"] < 2e-2, res
+    res = batch_consistency(long_, torch.stack([long_, long_]), short)  # row 1 took the wrong position
+    assert res["normrel_row1"] > 0.5, res
+    res = batch_consistency(long_, torch.stack([long_, short]), short)
+    assert res["normrel_row0"] == 0.0 and res["normrel_row1"] == 0.0 and res["maxabs_row1"] == 0.0
+    bad = torch.stack([long_, short]).clone()
+    bad[1, 3, 5] = float("inf")
+    assert not batch_consistency(long_, bad, short)["finite"]
+
+
+def test_half_precision_selftest_restores_dtype_and_outputs():
+    """fp16 models: the layout gate runs on a lossless fp32 up-cast, the model returns to fp16 bit-identically."""
+    import torch
+    from valueheads_pythia.commands.selftest import TEXT
+    from valueheads_pythia.models import load_model
+    model, tok = load_model("pythia-160m", revision="step143000", device="cpu", dtype="float16", attn_impl="sdpa")
+    ids = tok(TEXT, return_tensors="pt").input_ids
+    with torch.no_grad():
+        before = model(input_ids=ids).logits
+    w_before = model.gpt_neox.layers[3].attention.dense.weight.clone()
+    res = check_hook_layout(model, tok, layer=5, head=7)
+    assert model.dtype == torch.float16 and model.gpt_neox.layers[3].attention.dense.weight.dtype == torch.float16
+    assert torch.equal(model.gpt_neox.layers[3].attention.dense.weight, w_before)
+    with torch.no_grad():
+        after = model(input_ids=ids).logits
+    assert torch.equal(before, after)
+    assert res["dtype"] == "float16" and res["batch_layout_ok"], res
+    assert res["layout_fp32_normrel_row1"] < 1e-2 and res["batch_native_sane"], res
+    assert res["ok"], res

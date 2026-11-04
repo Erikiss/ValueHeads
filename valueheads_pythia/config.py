@@ -154,11 +154,13 @@ DTYPE_POLICY = {
     # activations, length dependent (2.8e-3 at ~300 tokens even for a batch of identical rows); the selftest / layout
     # test use this absolute tolerance, not 1e-3 (DESIGN 3.1: "Tests mit Toleranz 1e-2, nicht 1e-5")
     "tolerance_batched_vs_single": 1e-2,
-    # the same comparison relative to the per-layer activation scale (max |single-text activation| of the layer), which
-    # is what the selftest gates on: a layout / padding error changes activations by O(1) relative, kernel numerics by
-    # <= 1e-2 (fp32 eager) and a few 1e-2 at most (fp16 / bf16 sdpa, where batched and single runs take different kernels
-    # and the absolute difference scales with the activation magnitude of the large models)
-    "tolerance_rel_batched_vs_single": {"float32": 1e-2, "float16": 5e-2, "bfloat16": 5e-2},
+    # selftest gate (DESIGN 3.1 [korr. 2026-11-04]): per-layer relative L2 error ||batch - single|| / ||single|| of the
+    # hook inputs. The layout / padding check always runs in fp32 (half-precision models are cast up losslessly and back):
+    # measured on pythia-2.8b@step100000 a wrong token position gives >= 0.82, fp32 kernel numerics << 1e-2. In fp16 the
+    # same comparison is dominated by rounding noise (fp16 vs fp32 of ONE text: up to 0.16 in layers 24-31 of 2.8b on CPU,
+    # GPU batched-vs-single ~3x the CPU value), so the native half-precision run is only a sanity gate against overflow / NaN.
+    "tolerance_layout_normrel_fp32": 1e-2,
+    "sanity_normrel_half_precision": 0.5,
 }
 
 
