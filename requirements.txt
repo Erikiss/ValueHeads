@@ -1,0 +1,19 @@
+# Core (CPU and Colab GPU). Tested with torch 2.15 / transformers 5.22.1 / scikit-learn 1.9.1.
+torch>=2.1
+transformers>=4.56,<6
+datasets>=2.19
+accelerate
+numpy
+pandas
+scikit-learn>=1.4
+scipy
+matplotlib
+seaborn
+tqdm
+joblib
+huggingface_hub
+pytest
+# Optional: LLM judge via an OpenAI-compatible API (openai_compat judge)
+# openai>=1.0
+# Optional: 4-bit judges on T4 (ArmoRM, TruthfulQA judges)
+# bitsandbytes

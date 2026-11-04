@@ -1,0 +1,70 @@
+MIT License
+
+Copyright (c) 2026 valueheads_pythia contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+Attribution
+--------------------------------------------------------------------------------
+
+This project is a port of the ValueHeads method to the Pythia model suite.
+Substantial parts of valueheads_pythia/{hooks,data,probing,directions,eval_generate}.py,
+valueheads_pythia/judge/openai_compat.py (judge prompts and client),
+valueheads_pythia/analysis/{heatmaps,correlations,direction_angles}.py and
+the evaluation prompt sets in data/ are adapted from the reference
+implementation
+
+    sihuo-design/valueheads (commit 227612f), MIT License
+    Copyright (c) 2026 Xueqi Ma, Yanbei Jiang, Xingjun Ma, James Bailey,
+    Sarah Monazam Erfani
+
+which accompanies the paper
+
+    "ValueHeads" - arXiv:2611.02503 (2026).
+
+The original MIT license text of that repository is reproduced below and
+applies to the adapted portions.
+
+MIT License
+
+Copyright (c) 2026 Xueqi Ma, Yanbei Jiang, Xingjun Ma, James Bailey, Sarah Monazam Erfani
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+The files data/jailbreakbench.csv (JailbreakBench, Chao et al., NeurIPS 2024
+Datasets & Benchmarks) and data/maliciousinstruct.csv (MaliciousInstruct,
+Huang et al., ICLR 2024) are redistributed unchanged from the reference
+repository; please cite the original works when using them.
