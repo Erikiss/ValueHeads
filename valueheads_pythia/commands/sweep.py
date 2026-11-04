@@ -146,8 +146,22 @@ def save_manifest(path, manifest):
         on_disk = load_manifest(path)
     except (OSError, ValueError):
         on_disk = {"revisions": {}}
-    revisions = dict(on_disk.get("revisions") or {})
-    revisions.update(manifest.get("revisions") or {})
+    revisions = {}
+    ours = manifest.get("revisions") or {}
+    theirs = on_disk.get("revisions") or {}
+    for rev in list(theirs) + [r for r in ours if r not in theirs]:
+        d, o = theirs.get(rev), ours.get(rev)
+        if o is None or d is None:
+            revisions[rev] = dict(o if o is not None else d)
+            continue
+        # per revision: union of finished values and timings, so a session holding a stale copy of another session's
+        # revision (both sessions load the whole manifest at start) never erases that session's progress
+        merged = {**d, **o}
+        merged["done"] = sorted(set(d.get("done", [])) | set(o.get("done", [])))
+        merged["timings"] = {**d.get("timings", {}), **o.get("timings", {})}
+        if "error" not in o and set(o.get("done", [])) >= set(d.get("done", [])):
+            merged.pop("error", None)
+        revisions[rev] = merged
     manifest["revisions"] = revisions
     manifest["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
     tmp = path + f".tmp{os.getpid()}"

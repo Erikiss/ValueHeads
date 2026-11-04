@@ -373,3 +373,25 @@ def test_sweep_retry_clears_old_error(tmp_path, monkeypatch):
     monkeypatch.setattr(sweep, "save_manifest", lambda path, m: None)
     sweep.run_revision(args, {"manifest": str(tmp_path / "m.json")}, "pythia-160m", "EleutherAI/pythia-160m", "step0", [], "smoke", 10, 2, manifest)
     assert "error" not in manifest["revisions"]["step0"]
+
+
+def test_save_manifest_keeps_progress_against_stale_copies(tmp_path):
+    """Two sessions on one root both hold the whole manifest from their start; a stale copy must not erase progress."""
+    from valueheads_pythia.commands.sweep import load_manifest, save_manifest
+    path = str(tmp_path / "manifest.json")
+    save_manifest(path, {"revisions": {"step0": {"done": ["honesty"], "timings": {"a": 1}}, "step2000": {"done": []}}})
+    sweep = load_manifest(path)                      # session 1 (owns step0)
+    causal = load_manifest(path)                     # session 2 (owns step2000), loaded at the same time
+    sweep["revisions"]["step0"]["done"] = ["harmless", "honesty"]
+    sweep["revisions"]["step0"]["timings"]["b"] = 2
+    save_manifest(path, sweep)
+    causal["revisions"]["step2000"]["done"] = ["honesty"]
+    save_manifest(path, causal)                      # holds a stale step0 entry
+    on_disk = load_manifest(path)
+    assert on_disk["revisions"]["step0"]["done"] == ["harmless", "honesty"]
+    assert on_disk["revisions"]["step0"]["timings"] == {"a": 1, "b": 2}
+    assert on_disk["revisions"]["step2000"]["done"] == ["honesty"]
+    # a successful retry clears an old error once it is at least as far as the stored entry
+    save_manifest(path, {"revisions": {"step4000": {"error": "TypeError", "timings": {}}}})
+    save_manifest(path, {"revisions": {"step4000": {"done": ["honesty"], "timings": {}}}})
+    assert "error" not in load_manifest(path)["revisions"]["step4000"]
