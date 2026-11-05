@@ -22,6 +22,7 @@ MASTER = os.path.join(ROOT, "notebooks", "ValueHeadsPythia_Colab.ipynb")
 CAUSAL = list(config.CAUSAL_CHECKPOINTS_DEFAULT)
 OTHERS = [r for r in config.CHECKPOINTS_DEFAULT if r not in CAUSAL]
 LITE_VALUES = ["honesty", "harmless", "helpful"]
+LITE_2_REVISIONS = ["step100000", "step64000", "step32000", "step16000", "step8000"]   # pythia-1.4b-lite-2, reverse order
 RUNS = {
     "pythia-160m": dict(model="pythia-160m", root="pythia-160m"),
     "pythia-410m": dict(model="pythia-410m", root="pythia-410m"),
@@ -38,6 +39,12 @@ RUNS = {
                                    sweep_only=True),
     "pythia-2.8b-causal-lite": dict(model="pythia-2.8b", root="pythia-2.8b", revisions=CAUSAL, values=LITE_VALUES, no_causal=True,
                                     drop=("9", "10")),
+    # second session for pythia-1.4b-lite (2026-11-05): Colab binds one runtime per notebook path, so a parallel session needs
+    # its own notebook. Same Drive folder, checkpoints in reverse order: the two sessions work towards each other and skip what
+    # the other one finished (results/manifest.json is merged per revision; probe/probe-stats skip existing tables).
+    "pythia-1.4b-lite-2": dict(model="pythia-1.4b", root="pythia-1.4b", revisions=LITE_2_REVISIONS, values=LITE_VALUES,
+                               no_causal=True, sweep_only=True,
+                               note="zweite Session neben `pythia-1.4b-lite` (gleicher Drive-Ordner, Checkpoints rückwärts)"),
 }
 DROP_SECTIONS = ("6", "7", "8", "9", "10", "12")       # markdown headers "## N." dropped (with their code cell) in sweep-only runs
 
@@ -63,7 +70,8 @@ def build(name, spec, model_override=None):
     model = model_override or spec["model"]
     # cell 0: banner
     banner = (f"> **Run-Notebook `{name}`** (erzeugt von `scripts/make_run_notebooks.py`, nicht von Hand bearbeiten): "
-              f"MODEL `{model}`, Drive-Ordner `MyDrive/ValueHeadsPythia/{spec['root']}`"
+              + (f"{spec['note']}; " if spec.get("note") else "")
+              + f"MODEL `{model}`, Drive-Ordner `MyDrive/ValueHeadsPythia/{spec['root']}`"
               + (f", Checkpoints `{' '.join(spec['revisions'])}`" if spec.get("revisions") else "")
               + (", nur Sweep (Zellen 1-5, 11; Evals und Einzel-Checkpoint-Zellen im Causal-Teil)" if spec.get("sweep_only") else "")
               + (f", Werte `{' '.join(spec['values'])}`" if spec.get("values") else (", alle 7 Werte" if spec.get("drop") else ""))
