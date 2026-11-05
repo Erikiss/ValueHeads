@@ -232,8 +232,7 @@ Selftest (inkl. Query-Head-Gate), Extraktion ohne Truncation, Probing + probe-st
 `Qwen/Qwen3-4B-Base` (alle 7 Werte, a100-Stichproben; `harmless_pooled` als uniforme Teilstichprobe von 20 000 der
 98 872 Train-Texte, alle 5 224 Val-Texte, `HARMLESS_POOLED_ALL = True` für alle), `overlap` gegen die 4B-Base-Sätze,
 Ergebnisse unter `MyDrive/ValueHeadsPythia/qwen3-4b/`. Das Ranking `paper` rechnet auf bf16-Features (sdpa, gebatcht,
-rechts gepaddet), die Referenz in fp16 Text für Text. Schätzung ~2.1 A100-Stunden (1.6-3.2 h), bei 5.4-8.5 CU je
-A100-Stunde ≈ 11-18 CU (Spanne 9-27); 15.6 M Tokens je Modell; die Probe-Zeit bei N = 20 000 ist ungemessen. CPU-Smoke
+rechts gepaddet), die Referenz in fp16 Text für Text. Schätzung ~6.5-7 A100-Stunden für beide Modelle (Spanne 5-8 h), ≈ 40 CU bei ~6 CU je A100-Stunde; hochgerechnet aus den gemessenen pythia-2.8b-Zeiten (Faktor ~1.8 je Probe), 15.6 M Tokens je Modell. CPU-Smoke
 derselben Datei: `VH_NB_SMOKE=1 VH_NB_MODELS=Qwen/Qwen3-0.6B-Base` (Rezept im Kopf des Generators).
 
 ## Modus `paper` vs. `pythia`
