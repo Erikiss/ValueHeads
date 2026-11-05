@@ -235,6 +235,95 @@ Ergebnisse unter `MyDrive/ValueHeadsPythia/qwen3-4b/`. Das Ranking `paper` rechn
 rechts gepaddet), die Referenz in fp16 Text für Text. Schätzung ~6.5-7 A100-Stunden für beide Modelle (Spanne 5-8 h), ≈ 40 CU bei ~6 CU je A100-Stunde; hochgerechnet aus den gemessenen pythia-2.8b-Zeiten (Faktor ~1.8 je Probe), 15.6 M Tokens je Modell. CPU-Smoke
 derselben Datei: `VH_NB_SMOKE=1 VH_NB_MODELS=Qwen/Qwen3-0.6B-Base` (Rezept im Kopf des Generators).
 
+## Kausaler Test: Ablation (Qwen3-4B)
+
+**Frage.** Die Top-15-%-HH-„helpful“-Heads überlappen den benannten 33-Head-ICL-Schaltkreis L20-27 (21 von 33 im Base-,
+23 von 33 im Instruct-Modell, angereichert nach Holm). Ist die Überlappung kausal: **stützt** sich das Modell für seine
+eigene Helpful-Präferenz auf diese Heads (*Reliance*), oder ist „helpful“ dort nur **dekodierbar** (*Expression*; Goodfire,
+„Shaping & Monitoring Models through their Internal Representations“)? Spezifikation: `docs/ABLATION_DESIGN.md`.
+
+**Design in zehn Zeilen.**
+1. Sätze (vor jeder Auswertung eingefroren, `results/ablation/{modell}_frozen_sets.json`): C33 (benannter Schaltkreis),
+   O = C33 ∩ Top-k(helpful), C33 − O, P_band (Top-k im Band 20-27 außerhalb C33, auf |O| mit O-Layerprofil), P_DoM
+   (Band-Heads mit größter DoM-Norm), C33-Leser/-Bremsen (Census), WholeBand (alle 256 Band-Heads), TopK_all (172).
+2. Zufallsmengen: layer- **und** KV-Gruppen-gematcht wie die Overlap-Null, geseedet, R = 100 (C33, O), 50, 20.
+3. Daten: HH-RLHF helpful (Train), Prompt-Cluster-disjunkt zu Probe-Train/-Val: means_ref 256, means_probe 256, EVAL 1000.
+4. Primärer Eingriff „mean“: Head-Slice des `o_proj`-Eingangs → label-neutrales Referenzmittel, an allen Antwortpositionen.
+5. Sekundär: mean_last, resample (Spender-Paar), dir_mean (nur die DoM-Richtung), gauss (normgleiches Rauschen).
+6. M1 (primär): gepaarte Änderung der Helpful-Marge (Mittel-Token-logp gewählt − abgelehnt), plus Summen-, Dreiwege-Marge.
+7. M2 Monitore (feste / neu gefittete / MLP-Probes, nie am ablierten Head), M3 ICL-Umkehrtest, M4 WikiText-Schaden,
+   M5 Selbstreparatur (DLA), M7 Prompt-Wiederverwendung, Längen-Terzile, Prompt-Tausch – alles sekundär/deskriptiv.
+8. Statistik: Cluster-Bootstrap (B = 10 000), empirisches p gegen die eigene Zufallsverteilung, z.
+9. Primäre Familie je Modell: M1 unter „mean“ für C33 und O, einseitig, **Holm (α = 0.05)**; Boden-Check vorab.
+10. **Gate:** CR20-Knockout auf der ICL-Batterie muss im Base-Modell klar unter allen Zufallsmengen liegen, sonst STOPP.
+
+**Notebooks** (je ein Pfad, damit beide parallel auf Konto A laufen; Drive-Ordner `MyDrive/ValueHeadsPythia/qwen3-4b`,
+erzeugt von `scripts/make_ablation_notebook.py`):
+[Base `qwen3-4b-base-ablation`](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/qwen3-4b-base-ablation.ipynb)
+(Gate hier) und
+[Instruct `qwen3-4b-ablation`](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/qwen3-4b-ablation.ipynb)
+(wartet in Stufe 0 bis zu 90 min auf das Base-Gate; Arm „feste Identität“ = Base-Sätze auf dem Instruct-Modell).
+Voraussetzung: die Probe-Tabellen des Overlap-Laufs (`results/heads/{modell}_main_helpful_pythia.json`).
+
+**Budget** (Schätzung aus Scouting-Tokenzahlen; die Rate ist nicht gemessen, der Pilot druckt die echte ETA):
+
+| | Bedingungen | Tokens | A100-h bei 5k / 8k / 10k tok/s | CU (×6) bei 8k |
+|---|---|---|---|---|
+| Stufe 0 Base (inkl. Gate, 21 ICL-Bedingungen) | ~26 | ~2.1 M | 0.12 / 0.07 / 0.06 (+ Modell-Laden ~0.2) | ~2 |
+| Stufe 1 (je Modell) | 203 | ~44.5 M | 2.5 / 1.5 / 1.2 | ~9 |
+| Stufe 2 Base | ~640 | ~83 M | 4.6 / 2.9 / 2.3 | ~17 |
+| Stufe 2 Instruct (inkl. feste Identität 105, CR20 21) | ~770 | ~100 M | 5.6 / 3.5 / 2.8 | ~21 |
+| **Summe Base / Instruct** | | ~129 M / ~145 M | **7.2 / 4.5 / 3.6** bzw. **8.0 / 5.0 / 4.0** | **~27 / ~30** |
+
+Reichen die CU nicht: Stufe 0 + 1 (≈ 2 h, ≈ 12 CU je Modell) beantworten die Primärfrage; Stufe 2 folgt der
+Prioritätsreihenfolge m3 → mean_sets → m4 → mean_last → m5 → m7 → resample → dir_mean → gauss → fixed_identity.
+
+**Was die Ergebnisse bedeuten:**
+
+| Ergebnis | Bedeutung |
+|---|---|
+| Gate STOPP | Die Methode findet nicht einmal bekannte ICL-Leser: keine Helpfulness-Aussage |
+| Gate ok, Boden | Die saubere Präferenz ist nicht von 0,5 unterscheidbar: M1 ist uninformativ, M2/M3 nur deskriptiv |
+| O signifikant (Holm) | Reliance: das Modell nutzt die Überlappungs-Heads für seine Helpful-Präferenz über layer-/KV-gematchte Zufalls-Heads hinaus |
+| C33 signifikant, O nicht | Die Präferenz hängt am ICL-Schaltkreis, aber nicht spezifisch an seinem helpful-dekodierenden Teil (CminusO, P_band vergleichen) |
+| keins signifikant | Helpful ist dort dekodierbar ohne nachgewiesene Reliance; TopK_all / WholeBand (anderer Ort, Redundanz) und M5 (Selbstreparatur) prüfen |
+| M2 L1 sinkt, L2 erholt sich | Der Monitor bricht, die Information bleibt erhalten (stromabwärts neu kodiert) |
+| Vorzeichenwechsel Base → Instruct | Post-Training ändert die Rolle derselben Kopf-Identitäten |
+
+**CLI** (idempotent; jede Bedingung eine Datei, ein Neustart überspringt Fertiges; Exit 2 Eingaben fehlen oder
+`--n_eval` weicht von den gerechneten HH-Bedingungen ab – N_EVAL ist kein Präfix, bewusst ändern nur mit
+`--change_n_eval` –, 3 Gate (ein voller Lauf braucht ein bestandenes Gate eines vollen Base-Laufs), 4 Selbsttest,
+5 eingefrorene Sätze weichen ab):
+
+```bash
+python -m valueheads_pythia.cli ablate --model Qwen/Qwen3-4B-Base --stage 0          # Gate, Split, Selbsttest, Sätze
+python -m valueheads_pythia.cli ablate --model Qwen/Qwen3-4B-Base --stage 1 --pilot  # Rate -> ETA / CU
+python -m valueheads_pythia.cli ablate --model Qwen/Qwen3-4B-Base --stage 1          # primär (C33, O, Holm)
+python -m valueheads_pythia.cli ablate --model Qwen/Qwen3-4B-Base --stage 2 --arms m3 mean_sets m4
+python -m valueheads_pythia.cli ablate --model Qwen/Qwen3-4B-Base --summary          # Bericht ohne Modell
+```
+
+CPU-Smoke (Qwen3-0.6B-Base, `--smoke`: 8 EVAL- und 8 + 8 MEANS-Paare, R = 2, B = 200, synthetische Smoke-Tabelle und
+synthetischer C33-Ersatz, beratendes Gate; nur Funktionsprüfung):
+
+```bash
+VHPY='import sys; sys.path.insert(0, "/pfad/zu/valueheads_pythia"); import runpy; runpy.run_module("valueheads_pythia.cli", run_name="__main__")'
+for st in "--stage 0" "--stage 1 --pilot" "--stage 1" "--stage 2" "--summary"; do
+  python3 -I -c "$VHPY" ablate --model Qwen/Qwen3-0.6B-Base --root /tmp/abl_smoke --device cpu --smoke \
+    --icl_source /pfad/zu/in-context-learning-circuit $st || break
+done
+# Notebook (wie beim Overlap-Notebook):
+VH_NB_SMOKE=1 VH_NB_MODELS=Qwen/Qwen3-0.6B-Base VH_NB_PROJECT=$PWD VH_ROOT=/tmp/abl_nb_smoke \
+  VH_ICL_REPO=/pfad/zu/in-context-learning-circuit jupyter nbconvert --to notebook --execute \
+  --ExecutePreprocessor.timeout=5400 --output /tmp/abl_nb_smoke/executed.ipynb notebooks/runs/qwen3-4b-base-ablation.ipynb
+```
+
+**Ausgaben** unter `results/ablation/`: `hh_helpful_split.json` (modellunabhängig, nur IDs/Hashes),
+`{modell}_frozen_sets.json`, `{modell}_ablation.{json,md}` (deutscher Bericht: Ergebnis in einem Satz, Gate, Boden,
+primäre Familie nach Holm, Sekundäres ohne Befund, Trajektorie Base → Instruct, Hook-Checks, Abweichungen, Eingaben),
+`{modell}_ablation_conditions.csv`, `{modell}_ablation_tests.csv` und je Modell `{modell}/` mit `selftest.json`, `refs.npz`,
+`m2_train.npz`, `probes_m2.npz`, `floor.json`, `gate.json`, `pilot.json`, `conditions/{name}.json` (+ `.m2.npz`).
+
 ## Modus `paper` vs. `pythia`
 
 | | `--mode paper` | `--mode pythia` (Default) |
@@ -410,14 +499,17 @@ Aus dem Vollständigkeits-Check gegen DESIGN; jeweils mit dem Grund, warum es (n
 ```
 valueheads_pythia/      config, models (o_proj-Resolver, Numerik-Policy), hooks, data, extract, probing, probing_stats,
                         directions, controls, eval_likelihood, eval_generate, stats, hf_cache, icl_sets, overlap, judge/ (inkl. armorm_model),
-                        analysis/ (inkl. causal_plots), commands/, cli
+                        analysis/ (inkl. causal_plots), commands/, cli; kausaler Ablationstest: ablation (Eingriffe, Runner,
+                        Referenzen, Selbsttest), ablation_sets (HH-Split, eingefrorene Sätze), ablation_stats (Bootstrap,
+                        Holm, Gate, Befundtexte), icl_battery (ICL-Batterie + Query-Knockout), ablation_metrics,
+                        ablation_report, commands/ablate
 scripts/                run_smoke.sh, run_localize.sh, run_causal.sh, run_sweep.sh, make_run_notebooks.py,
-                        make_overlap_notebook.py
+                        make_overlap_notebook.py, make_ablation_notebook.py
 notebooks/              ValueHeadsPythia_Colab.ipynb (12 Zellen, ohne Ausgaben gespeichert); runs/ (erzeugte Run-Notebooks,
-                        u. a. qwen3-4b-overlap.ipynb)
+                        u. a. qwen3-4b-overlap.ipynb, qwen3-4b-base-ablation.ipynb, qwen3-4b-ablation.ipynb)
 tests/                  pytest (Hook-Layout, Masken-Positionen, Datenzählungen, Probing vs. Referenz-Repo, Resume, ...)
-data/                   jailbreakbench.csv, maliciousinstruct.csv (nur Modus paper)
-docs/                   eval_likelihood.md
+data/                   jailbreakbench.csv, maliciousinstruct.csv (nur Modus paper); icl/concept_tasks.json (ICL-Batterie)
+docs/                   eval_likelihood.md, ABLATION_DESIGN.md (Spezifikation des kausalen Tests)
 DESIGN.md               verbindliche Spezifikation (Kopie des Design-Tracks)
 SMOKE_RESULTS.md        Smoke-Lauf der kompletten Kette auf CPU: Befehle, Wall-Zeiten, Head-Tabellen, Eval-Summary, Sweep
 ```
@@ -429,6 +521,11 @@ SMOKE_RESULTS.md        Smoke-Lauf der kompletten Kette auf CPU: Befehle, Wall-Z
   Referenz-Repo **sihuo-design/valueheads** (MIT, Copyright (c) 2026 Xueqi Ma, Yanbei Jiang, Xingjun Ma, James Bailey,
   Sarah Monazam Erfani) übernommen und angepasst; die Original-Lizenz ist in `LICENSE` wiedergegeben. Bitte das Paper
   arXiv 2611.02503 zitieren.
+- Kopf-Sätze und Census-Regel (`icl_sets.py`) sowie die ICL-Batterie (`icl_battery.py`: `build`, `mk`, `NATLAB`, die
+  concept12n-Schleife, `is_bare_ws` / `label_spans` / `target_ids`; Nachbau von Query-Knockout und Margen-Scoring) stammen
+  aus **andrewgcodes/in-context-learning-circuit** @ `26c44caf8f9b` (MIT, Copyright (c) 2026 Andrew Gao, William Gao);
+  `data/icl/concept_tasks.json` ist unverändert von dort übernommen (sha256 in `data/README.md`). Bitte das Paper
+  arXiv 2611.05344 zitieren.
 - Modelle: Pythia (EleutherAI, Apache-2.0). Judges: ArmoRM-Llama3-8B-v0.1 (Llama-3-Lizenz, `trust_remote_code`),
   Qwen3Guard-Gen (Apache-2.0), allenai/truthfulqa-*-judge-llama2-7B (Llama-2-Lizenz), Qwen3-30B-A3B-Instruct-2507
   (Apache-2.0); WildGuard / Llama-Guard sind gated und nicht Default.

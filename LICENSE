@@ -70,7 +70,7 @@ Huang et al., ICLR 2024) are redistributed unchanged from the reference
 repository; please cite the original works when using them.
 
 --------------------------------------------------------------------------------
-Attribution: in-context-learning circuit head sets
+Attribution: in-context-learning circuit (head sets, battery)
 --------------------------------------------------------------------------------
 
 valueheads_pythia/icl_sets.py contains head lists derived from, and a
@@ -84,10 +84,20 @@ which accompanies the paper
 
     "A Circuit for In-Context Learning" - arXiv:2611.05344 (2026).
 
+valueheads_pythia/icl_battery.py contains code adapted from the same
+repository (icl/tasks.py: build, mk, NATLAB and the concept-battery loop of
+fam_concept / fam_concept12n; icl/tokspans.py: is_bare_ws, label_spans,
+target_ids) and a re-implementation of its query-position knockout and
+margin scoring (icl/run.py, icl/hooks.py, icl/score.py). The battery data
+file data/icl/concept_tasks.json is redistributed unchanged from
+batteries/concept_tasks.json at the same commit (sha256
+bf242720283bdc9967ffdb22da277f2fc0237d374de2b8214c45790187e60df0).
+
 The per-head census files (data/D188_heads_*.json) are not redistributed; they
 are read from a local checkout or downloaded at runtime from that pinned
 commit. The original MIT license text of that repository is reproduced below
-and applies to the derived portions.
+and applies to the derived and adapted portions and to the redistributed data
+file.
 
 MIT License
 
