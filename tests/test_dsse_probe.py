@@ -866,15 +866,109 @@ def test_key_table_flags_identical_features(tiny_run):
 
 def test_hub_weight_files_real_branches():
     """Network: pythia-160m step0 has its own model.safetensors; pythia-2.8b step0 is the ambiguous layout."""
-    f160 = M.hub_weight_files("EleutherAI/pythia-160m", "step0")
-    if f160 is None:
+    try:
+        f160 = M.hub_weight_files("EleutherAI/pythia-160m", "step0")
+        f28 = M.hub_weight_files("EleutherAI/pythia-2.8b", "step0")
+        fmain = M.hub_weight_files("EleutherAI/pythia-2.8b", "main")
+    except M.HubListingError:
+        f160 = None
+    if f160 is None or f28 is None or fmain is None:
         pytest.skip("Hub not reachable")
     used, amb = M.choose_weight_files(f160)
     assert [p for p, _ in used] == ["model.safetensors"] and amb is False and M.weight_fingerprint(used)
-    f28 = M.hub_weight_files("EleutherAI/pythia-2.8b", "step0")
     used, amb = M.choose_weight_files(f28)
     assert amb is True and len(used) == 2 and all(p.startswith("model-") for p, _ in used)
-    main_single = [s for p, s in M.hub_weight_files("EleutherAI/pythia-2.8b", "main") if p == "model.safetensors"]
+    main_single = [s for p, s in fmain if p == "model.safetensors"]
     step0_single = [s for p, s in f28 if p == "model.safetensors"]
     assert main_single == step0_single                                         # the documented Hub defect
     assert M.hub_weight_files(str(os.getcwd())) is None                        # local directories: no Hub lookup
+
+
+# ----------------------------------------------------------------------------- 31-34: review of the weight-source fix
+
+
+def test_download_shards_allowlist_and_stray_removal(tmp_path, monkeypatch):
+    """snapshot_download gets an allow-list (no optimizer.pt), a pre-cached single model.safetensors is removed from the
+    snapshot folder, the index must exist; weight_source returns that folder for an ambiguous branch."""
+    snap = tmp_path / "snap"; snap.mkdir()
+    for fn in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors", "model.safetensors.index.json", "config.json"):
+        (snap / fn).write_text("x")
+    (snap / "model.safetensors").write_text("main weights")                   # planted by an earlier plain load
+    (snap / "pytorch_model.bin").write_text("main weights")
+    calls = {}
+
+    def fake_snapshot_download(hf_id, revision=None, allow_patterns=None, **kw):
+        calls.update(hf_id=hf_id, revision=revision, allow=allow_patterns, kw=kw); return str(snap)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    files = [("model-00001-of-00002.safetensors", "c" * 64), ("model-00002-of-00002.safetensors", "d" * 64),
+             ("model.safetensors", "a" * 64), ("model.safetensors.index.json", None), ("pytorch_model.bin", "b" * 64)]
+    monkeypatch.setattr(M, "hub_weight_files", lambda hf_id, revision=None, retries=3: files)
+    local, used, amb, fp = M.weight_source("EleutherAI/pythia-2.8b", "step0")
+    assert local == str(snap) and amb is True and [p for p, _ in used] == ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+    assert calls["revision"] == "step0" and "ignore_patterns" not in calls["kw"]
+    assert set(calls["allow"]) >= {"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors", "model.safetensors.index.json", "config.json"}
+    assert not any("optimizer" in a or a == "*" for a in calls["allow"])
+    assert not (snap / "model.safetensors").exists() and not (snap / "pytorch_model.bin").exists()   # stray single files gone
+    assert (snap / "model.safetensors.index.json").exists() and fp == M.weight_fingerprint(used)
+    (snap / "model.safetensors.index.json").unlink()
+    with pytest.raises(RuntimeError, match="index missing"):
+        M.download_shards("EleutherAI/pythia-2.8b", "step0", used)
+
+
+def test_hub_listing_failure_is_not_silent(monkeypatch):
+    """Online: a failing listing raises after retries (no silent fall-back to the single file); offline: None."""
+    import huggingface_hub
+    calls = {"n": 0}
+
+    class FakeApi:
+        def list_repo_tree(self, hf_id, revision=None):
+            calls["n"] += 1; raise ConnectionError("429")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(M, "hub_offline", lambda: False)
+    import time as _t
+    monkeypatch.setattr(_t, "sleep", lambda s: None)
+    with pytest.raises(M.HubListingError):
+        M.hub_weight_files("EleutherAI/pythia-2.8b", "step0", retries=3)
+    assert calls["n"] == 3
+    monkeypatch.setattr(M, "hub_offline", lambda: True)
+    assert M.hub_weight_files("EleutherAI/pythia-2.8b", "step0") is None    # offline: quiet, as before
+    # CLI: extraction is refused, not run with an unverified source
+    monkeypatch.setattr(M, "hub_offline", lambda: False)
+    rc = cli.main(["dsse-probe", "--stage", "extract", "--model", "pythia-160m", "--revisions", "step0", "--n_rows", "2", "--device", "cpu",
+                   "--root", "/tmp/claude-0/-home-user-valueheads/3ccf061c-00fb-546b-8a09-3ab673f5e720/scratchpad/_hubfail_root",
+                   "--raw_dir", "/nonexistent-raw-dir"])
+    assert rc == 1
+
+
+def test_probe_fingerprint_stable_for_old_manifests():
+    """A manifest without weight_fingerprint hashes exactly as before the key was added (valid files are not re-probed)."""
+    settings = D.probe_settings(n_pcs=8, folds=2, boot=5, perms=2)
+    man = {k: f"v_{k}" for k in D.EXTRACTION_IDENTITY if k != "weight_fingerprint"}
+    old_identity = tuple(k for k in D.EXTRACTION_IDENTITY if k != "weight_fingerprint")
+    old = D._fingerprint(settings, {"rows_sha256": "r", "scores_sha256": "s", "npz": "x.npz", "extraction": {k: man.get(k) for k in old_identity}})
+    new = D._fingerprint(settings, {"rows_sha256": "r", "scores_sha256": "s", "npz": "x.npz",
+                                    "extraction": {k: man.get(k) for k in D.EXTRACTION_IDENTITY if k != "weight_fingerprint" or man.get(k)}})
+    assert old == new
+    man2 = dict(man, weight_fingerprint="f" * 64)
+    withfp = D._fingerprint(settings, {"rows_sha256": "r", "scores_sha256": "s", "npz": "x.npz",
+                                       "extraction": {k: man2.get(k) for k in D.EXTRACTION_IDENTITY if k != "weight_fingerprint" or man2.get(k)}})
+    assert withfp != old
+
+
+def test_recover_staged_discards_stale_ambiguous_pair(synthetic_dir, tmp_path, capsys):
+    """A staged pair without weight fingerprint from an ambiguous branch is discarded instead of published."""
+    model, tok = D.tiny_model(seed=0)
+    rows = D.build_rows(synthetic_dir, n_rows=4)
+    stage = str(tmp_path / "stage"); target = str(tmp_path / "features" / "tiny-gptneox_step0.npz")
+    model.vh_info["revision"] = "step0"
+    D.extract_dsse(model, tok, rows, target, layers=[0, 2], batch_size=8, max_tokens_per_batch=512, max_length=64, prompt_cap=32,
+                   stage_dir=stage, show_progress=False, say=lambda *a, **k: None)
+    tmp = os.path.join(stage, "tiny-gptneox_step0.tmp.npz")
+    shutil.move(target, tmp); shutil.move(D.manifest_path(target), D.staged_manifest_path(tmp))
+    expect = {"version": D.VERSION, "n_rows": 4, "row_seed": D.ROW_SEED, "max_length": 64, "prompt_cap": 32, "layers": [0, 2],
+              "hf_id": None, "revision": "step0", "rows_sha256": rows.rows_sha256()}
+    assert D.recover_staged(stage, target, expect, say=print, ambiguous=True) is False
+    assert "ambiguous Hub branch" in capsys.readouterr().out and not os.path.exists(tmp) and not os.path.exists(target)

@@ -104,21 +104,38 @@ def resolve_commit_sha(hf_id, revision=None):
 WEIGHT_SUFFIXES = (".safetensors", ".bin", ".safetensors.index.json")
 
 
-def hub_weight_files(hf_id, revision=None):
+class HubListingError(RuntimeError):
+    """The Hub file listing of a branch failed although the session is not offline (after retries)."""
+
+
+def hub_offline():
+    import huggingface_hub.constants as hc
+    return bool(getattr(hc, "HF_HUB_OFFLINE", False)) or os.environ.get("HF_HUB_OFFLINE", "0") in ("1", "true", "True", "yes")
+
+
+def hub_weight_files(hf_id, revision=None, retries=3):
     """Sorted [(path, lfs_sha256 | None)] of the weight files on the Hub branch `revision` of `hf_id` (safetensors, bin,
-    index). None when the Hub cannot be reached (offline) or `hf_id` is a local directory."""
-    if os.path.isdir(hf_id):
+    index). None when `hf_id` is a local directory or the session is offline (HF_HUB_OFFLINE). A listing failure while
+    online raises HubListingError after `retries` attempts (2 / 4 / 8 s): callers that need the listing for correctness
+    (feature extraction) must not fall back to the single file silently."""
+    if os.path.isdir(hf_id) or hub_offline():
         return None
-    try:
-        from huggingface_hub import HfApi
-        out = []
-        for e in HfApi().list_repo_tree(hf_id, revision=revision):
-            if e.path.endswith(WEIGHT_SUFFIXES):
-                lfs = getattr(e, "lfs", None)
-                out.append((e.path, getattr(lfs, "sha256", None) if lfs is not None else None))
-        return sorted(out)
-    except Exception:
-        return None
+    from huggingface_hub import HfApi
+    import time as _time
+    last = None
+    for attempt in range(max(1, retries)):
+        try:
+            out = []
+            for e in HfApi().list_repo_tree(hf_id, revision=revision):
+                if e.path.endswith(WEIGHT_SUFFIXES):
+                    lfs = getattr(e, "lfs", None)
+                    out.append((e.path, getattr(lfs, "sha256", None) if lfs is not None else None))
+            return sorted(out)
+        except Exception as e:                                             # 429 / 5xx / proxy: retry, then raise
+            last = e
+            if attempt + 1 < retries:
+                _time.sleep(2 ** (attempt + 1))
+    raise HubListingError(f"could not list the weight files of {hf_id}@{revision or 'main'} on the Hub ({type(last).__name__}: {last})")
 
 
 def choose_weight_files(files):
@@ -155,9 +172,34 @@ def weight_source(hf_id, revision=None):
     used, ambiguous = choose_weight_files(files)
     if not ambiguous:
         return hf_id, used, False, weight_fingerprint(used)
-    from huggingface_hub import snapshot_download
-    local = snapshot_download(hf_id, revision=revision, ignore_patterns=["model.safetensors", "pytorch_model.bin", "*.msgpack", "*.h5", "*.ckpt"])
+    local = download_shards(hf_id, revision, used)
     return local, used, True, weight_fingerprint(used)
+
+
+SHARD_SIDE_FILES = ["model.safetensors.index.json", "config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json",
+                    "special_tokens_map.json", "tokenizer.model", "vocab.json", "merges.txt", "added_tokens.json", "chat_template.jinja"]
+STRAY_WEIGHT_FILES = ("model.safetensors", "pytorch_model.bin")
+
+
+def download_shards(hf_id, revision, used):
+    """Cache snapshot of `revision` holding ONLY the chosen shards + index + config / tokenizer files (allow-list, so a
+    36 GB optimizer.pt next to the shards is never fetched). A single model.safetensors / pytorch_model.bin already present
+    in that snapshot (an earlier load through the plain path) is removed from the snapshot folder (it is a symlink into
+    the blob store; the blob stays until hf_cache.cleanup_hf_revision), because transformers prefers the single file over
+    the index when loading from a directory. Raises when the index is missing afterwards."""
+    from huggingface_hub import snapshot_download
+    allow = [p for p, _ in (used or [])] + SHARD_SIDE_FILES
+    local = snapshot_download(hf_id, revision=revision, allow_patterns=allow)
+    for stray in STRAY_WEIGHT_FILES:
+        p = os.path.join(local, stray)
+        if os.path.lexists(p):
+            os.remove(p)
+    if not os.path.exists(os.path.join(local, "model.safetensors.index.json")):
+        raise RuntimeError(f"{hf_id}@{revision}: shard index missing in {local} after download")
+    missing = [p for p, _ in (used or []) if not os.path.exists(os.path.join(local, p))]
+    if missing:
+        raise RuntimeError(f"{hf_id}@{revision}: shards missing in {local}: {missing}")
+    return local
 
 
 def load_tokenizer(hf_id, revision=None, trust_remote_code=False):
@@ -191,7 +233,11 @@ def load_model(name_or_hf_id, revision=None, device="auto", dtype=None, attn_imp
     check_numerics(dtype, attn_impl, allow_unsafe)
 
     tokenizer, tok_revision = load_tokenizer(hf_id, revision, trust_remote_code)
-    load_from, used_files, ambiguous, fingerprint = weight_source(hf_id, revision)
+    try:
+        load_from, used_files, ambiguous, fingerprint = weight_source(hf_id, revision)
+        source = "shards (ambiguous branch)" if ambiguous else "hub"
+    except HubListingError as e:                                            # other commands keep working; the manifest says so
+        load_from, used_files, ambiguous, fingerprint, source = hf_id, None, False, None, f"unknown (Hub listing failed: {e})"
     model = AutoModelForCausalLM.from_pretrained(
         load_from, revision=None if load_from != hf_id else revision, dtype=dtype, attn_implementation=attn_impl,
         trust_remote_code=trust_remote_code,
@@ -205,8 +251,7 @@ def load_model(name_or_hf_id, revision=None, device="auto", dtype=None, attn_imp
         "device": device, "transformers": transformers.__version__, "torch": torch.__version__,
         "geometry": dict(zip(("layers", "heads", "head_dim"), model_geometry(model.config))),
         "kv_heads": num_kv_heads(model.config), "hidden": model.config.hidden_size,
-        "weight_files": used_files, "weight_source": "shards (ambiguous branch)" if ambiguous else "hub",
-        "weight_fingerprint": fingerprint,
+        "weight_files": used_files, "weight_source": source, "weight_fingerprint": fingerprint,
     }
     return model, tokenizer
 

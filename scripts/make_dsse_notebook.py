@@ -301,12 +301,20 @@ PROBE_ARGS = ["--raw_dir", RAW_DIR, "--n_pcs", N_PCS, "--folds", FOLDS, "--boot"
 
 
 def probed_and_deleted(path, model_short, r):
-    """KEEP_FEATURES = False: the npz is gone but its sidecar and a probe json of exactly that extraction exist."""
+    """KEEP_FEATURES = False: the npz is gone but its sidecar and a probe json of exactly that extraction exist. A sidecar
+    without weight fingerprint from an ambiguous Hub branch (single file + shards) does not count: that pair is rebuilt."""
     probe_json = os.path.join(P["dsse"], f"{model_short}_{r}_probe.json")
     if KEEP_FEATURES or os.path.exists(path) or not (os.path.exists(D.manifest_path(path)) and os.path.exists(probe_json)):
         return False
     with open(D.manifest_path(path)) as f:
         side = json.load(f)
+    if not side.get("weight_fingerprint") and not TINY:
+        from valueheads_pythia import models as VM
+        try:
+            if VM.choose_weight_files(VM.hub_weight_files(side.get("hf_id") or config.MODELS[model_short]["hf_id"], r))[1]:
+                return False
+        except Exception:
+            return False
     with open(probe_json) as f:
         pj = json.load(f)
     return pj.get("manifest", {}).get("finished") == side.get("finished") and pj.get("manifest", {}).get("rows_sha256") == side.get("rows_sha256")

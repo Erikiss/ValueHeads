@@ -696,7 +696,7 @@ def manifest_mismatch(manifest, expect, keys=MANIFEST_KEYS):
     return bad
 
 
-def recover_staged(stage_dir, out_path, expect, say=print):
+def recover_staged(stage_dir, out_path, expect, say=print, ambiguous=False):
     """True when <stage_dir>/<name>.tmp.npz + <name>.tmp.manifest.json exist, the manifest matches `expect` (MANIFEST_KEYS) and
     the npz is readable: the pair is then published to out_path without recomputation. Staged files that mismatch or are
     unreadable are deleted (False). False when nothing is staged."""
@@ -709,6 +709,8 @@ def recover_staged(stage_dir, out_path, expect, say=print):
     with open(staged_manifest) as f:
         manifest = json.load(f)
     bad = manifest_mismatch(manifest, expect)
+    if stale_weight_source(manifest, ambiguous):
+        bad = bad + ["weight_fingerprint (missing; ambiguous Hub branch)"]
     if bad:
         say(f"[dsse] staged {tmp}: different settings {bad}; discarded")
         os.remove(tmp)
@@ -1573,8 +1575,10 @@ def probe_feature_file(npz_path, raw_dir, out_dir, settings, n_jobs=-1, force=Fa
     model, revision = man.get("model") or os.path.basename(npz_path)[:-4].rsplit("_", 1)[0], man.get("revision") or "main"
     base = os.path.join(out_dir, f"{model}_{revision}")
     scores_sha = file_sha256(raw_file(raw_dir, "scores.csv"))
+    # the weight fingerprint enters the identity only when the manifest carries one, so the probe fingerprints of files
+    # extracted before the weight-source check stay unchanged (no needless re-probing of valid files)
     fp = _fingerprint(settings, {"rows_sha256": man.get("rows_sha256"), "scores_sha256": scores_sha, "npz": os.path.basename(npz_path),
-                                 "extraction": {k: man.get(k) for k in EXTRACTION_IDENTITY}})
+                                 "extraction": {k: man.get(k) for k in EXTRACTION_IDENTITY if k != "weight_fingerprint" or man.get(k)}})
     if os.path.exists(base + "_probe.json") and not force:
         with open(base + "_probe.json") as f:
             old = json.load(f)

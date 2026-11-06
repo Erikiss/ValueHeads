@@ -134,7 +134,7 @@ def _expected_layers(short, args, n_datasets):
 
 
 def stage_extract(args, p, raw_dir, say):
-    from ..models import choose_weight_files, hub_weight_files, load_model, resolve_device, set_seed, weight_fingerprint
+    from ..models import HubListingError, choose_weight_files, hub_weight_files, load_model, resolve_device, set_seed, weight_fingerprint
     device = resolve_device(args.device)
     batch_size = args.batch_size or (64 if device.startswith("cuda") else 16)
     max_tokens = args.max_tokens_per_batch or (16384 if device.startswith("cuda") else 4096)
@@ -146,7 +146,11 @@ def stage_extract(args, p, raw_dir, say):
     os.makedirs(p["features"], exist_ok=True)
     for revision in _revisions(args):
         out_path = D.feature_path(p, short, revision)
-        files = None if args.tiny else hub_weight_files(hf_id, revision)
+        try:
+            files = None if args.tiny else hub_weight_files(hf_id, revision)
+        except HubListingError as e:                      # never extract with an unverified weight source
+            print(f"[dsse] {e}; extraction of {short}@{revision} refused (retry later)")
+            return 1
         used, ambiguous = choose_weight_files(files)
         expect = {"version": D.VERSION, "n_rows": args.n_rows, "row_seed": D.ROW_SEED, "max_length": args.max_length,
                   "prompt_cap": args.prompt_cap, "hf_id": hf_id, "revision": revision, "rows_sha256": rows_sha,
@@ -168,7 +172,7 @@ def stage_extract(args, p, raw_dir, say):
         if done and not args.force:
             say(f"[dsse] skip {out_path}: feature file exists for these settings")
             continue
-        if not args.force and D.recover_staged(args.stage_dir, out_path, expect, say=say):
+        if not args.force and D.recover_staged(args.stage_dir, out_path, expect, say=say, ambiguous=ambiguous):
             continue                                          # a complete pair whose move to Drive failed last time
         set_seed(args.seed)
         t0 = time.time()

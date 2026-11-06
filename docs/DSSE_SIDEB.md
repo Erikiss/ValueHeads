@@ -997,7 +997,19 @@ Behebung:
 4. Notebook: die Extraktionszelle meldet „NEU extrahiert", wenn eine vorhandene Datei neu gebaut wurde, und druckt
    Gewichtsquelle und Fingerprint je Paar.
 
+5. Nach einer Skeptiker-Durchsicht des Fixes: der Shard-Download benutzt eine **Allow-Liste** (nur die gewählten Shards,
+   Index, Config, Tokenizer-Dateien), damit die 36.6-GB-Datei `optimizer.pt` der 2.8b-Zweige nie geladen wird; eine im
+   Cache-Snapshot bereits vorhandene `model.safetensors` / `pytorch_model.bin` (frühere Ladung über den alten Pfad) wird aus
+   dem Snapshot-Ordner entfernt, weil transformers sie beim Laden aus einem Verzeichnis dem Index vorziehen würde;
+   `hub_weight_files` unterscheidet offline (None) von Fehlern (nach drei Versuchen `HubListingError`), und `--stage extract`
+   verweigert dann die Extraktion statt still die Einzeldatei zu laden; der Probe-Fingerprint nimmt den Gewichts-Fingerprint
+   nur auf, wenn das Manifest einen trägt (die 16 gültigen Dateien werden nicht neu geprobt); `recover_staged` verwirft ein
+   gestagtes Paar ohne Fingerprint von einem mehrdeutigen Zweig; `probed_and_deleted` (KEEP_FEATURES = False) erkennt solche
+   Paare ebenfalls als neu zu bauen.
+
 Tests: `test_choose_weight_files_and_fingerprint`, `test_manifest_fingerprint_tolerance_and_stale_detection`,
-`test_key_table_flags_identical_features`, `test_hub_weight_files_real_branches` (Netz; prüft die Hub-Lage).
+`test_key_table_flags_identical_features`, `test_hub_weight_files_real_branches` (Netz; prüft die Hub-Lage),
+`test_download_shards_allowlist_and_stray_removal`, `test_hub_listing_failure_is_not_silent`,
+`test_probe_fingerprint_stable_for_old_manifests`, `test_recover_staged_discards_stale_ambiguous_pair` (34 Tests).
 Folge für den laufenden Lauf: Notebook 2 nach dem Pull erneut starten; es baut nur die drei betroffenen 2.8b-Paare neu
 (je ~12 min Extraktion plus Probe) und schreibt den Report neu.
