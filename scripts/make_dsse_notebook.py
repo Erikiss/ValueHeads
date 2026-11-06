@@ -11,8 +11,14 @@ from its configuration cell, so fixes to the master reach this notebook on the n
 budget and ETA, probes + baselines, report) is defined here. Re-run after every change of the master notebook or of
 this script:
 
-    python3 scripts/make_dsse_notebook.py                         # notebooks/runs/dsse-sideB.ipynb
+    python3 scripts/make_dsse_notebook.py                         # notebooks/runs/dsse-sideB.ipynb + dsse-sideB-2.ipynb
     python3 scripts/make_dsse_notebook.py --out /tmp/nb_test      # elsewhere (CPU / nbconvert check)
+
+Two notebooks come out of the same cells (VARIANTS): `dsse-sideB` (all five models, checkpoints forward) and
+`dsse-sideB-2` for a parallel second Colab session on the same Drive folder (a second tab of the same notebook path would
+attach to the first runtime): only pythia-2.8b, checkpoints in reverse order so the two sessions never work on the same
+pair at the same time, and the model-independent baselines computed first so that they exist long before session 1
+reaches its probe cell.
 
 CPU smoke of the same file (synthetic DSSE layout from pseudo-words, pythia-160m@step0 only, N_ROWS 8; nothing but
 sizes changes). Without network and without a cached pythia-160m the smoke degrades by itself to a tiny random GPT-NeoX
@@ -35,6 +41,18 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MASTER = os.path.join(ROOT, "notebooks", "ValueHeadsPythia_Colab.ipynb")
 NAME = "dsse-sideB"
 DRIVE_SUBDIR = "dsse"
+VARIANTS = {
+    "dsse-sideB": dict(models="list(config.PYTHIA_SIZES)", revisions='["step0", "step2000", "step16000", "step143000"]',
+                       baselines_first=False, banner=None),
+    "dsse-sideB-2": dict(models='["pythia-2.8b"]', revisions='["step143000", "step16000", "step2000", "step0"]', baselines_first=True,
+                         banner="""> **Run-Notebook `dsse-sideB-2`** (erzeugt von `scripts/make_dsse_notebook.py`, nicht von Hand bearbeiten): **zweite,
+> parallele Session** zum Notebook `dsse-sideB` auf demselben Drive-Ordner `MyDrive/ValueHeadsPythia/dsse`: nur
+> **pythia-2.8b**, Checkpoints **rückwärts** (`step143000` → `step0`), damit sich die beiden Sessions nie dasselbe Paar
+> teilen, und die modellunabhängigen Baselines **zuerst** (CPU, ~10 min), damit sie längst da sind, wenn Session 1 ihre
+> Zelle 6 erreicht. Eigener Notebook-Pfad, weil ein zweiter Tab desselben Pfads nur an die erste Laufzeit andockt.
+> *Laufzeit → Alle ausführen*."""),
+}
+CUR = NAME                                                        # variant being built (cell ids)
 
 
 def src(cell):
@@ -57,12 +75,12 @@ def master_cell(cells, prefix):
 
 
 def md(text):
-    return {"cell_type": "markdown", "id": uuid.uuid5(uuid.NAMESPACE_URL, NAME + text[:80]).hex[:8], "metadata": {},
+    return {"cell_type": "markdown", "id": uuid.uuid5(uuid.NAMESPACE_URL, CUR + text[:80]).hex[:8], "metadata": {},
             "source": text.strip("\n").splitlines(keepends=True)}
 
 
 def code(text):
-    return {"cell_type": "code", "id": uuid.uuid5(uuid.NAMESPACE_URL, NAME + text[:120]).hex[:8], "metadata": {},
+    return {"cell_type": "code", "id": uuid.uuid5(uuid.NAMESPACE_URL, CUR + text[:120]).hex[:8], "metadata": {},
             "execution_count": None, "outputs": [], "source": text.strip("\n").splitlines(keepends=True)}
 
 
@@ -187,6 +205,7 @@ MAX_LENGTH, PROMPT_CAP = 512, 256
 EXTRACT_BATCH = ["--batch_size", "64", "--max_tokens_per_batch", "16384"] if HAS_CUDA else []
 CLEANUP_CACHE = IN_COLAB and not SMOKE                   # delete each checkpoint's HF snapshot after its extraction
 PROBE_INLINE = True                                      # CPU probes of a pair right after its extraction (idempotent)
+BASELINES_FIRST = False                                  # second session: model-independent baselines before the extraction loop
 KEEP_FEATURES = True                                     # False: delete each npz from Drive after its probe (Drive < 1.5 GB)
 TINY = os.environ.get("VH_NB_TINY") == "1"               # tiny random GPT-NeoX + byte tokenizer instead of a download
 if SMOKE:
@@ -271,6 +290,10 @@ print(f"[budget] {budget['n_rows']} Zeilen, {budget['n_tokens']} Tokens je (Mode
       f"Laenge Mittel {budget['mean_len']:.0f} / Median {budget['median_len']:.0f} / Max {budget['max_len']}")
 A100_TOKS_160M = 100000.0                 # README throughput assumption (A100, 160m); replaced by the measured rate below
 pairs = [(m, r) for m in MODELS for r in REVISIONS]
+if BASELINES_FIRST:
+    # second session: baselines now (CPU, idempotent), so they exist long before the other session reaches its cell 6
+    run("dsse-probe", "--stage", "baselines", "--raw_dir", RAW_DIR, "--n_rows", N_ROWS, "--n_pcs", N_PCS, "--folds", FOLDS,
+        "--boot", BOOT, "--perms", PERMS, "--quiet")
 if HAS_CUDA:
     print("[ETA, Annahme] " + ", ".join(f"{m} {len(REVISIONS)} x {budget['n_tokens'] / (A100_TOKS_160M / D.PARAM_SCALE.get(m, 1.0)) / 60:.0f} min"
                                        for m in MODELS))
@@ -431,7 +454,10 @@ Drive kopiert.
 """
 
 
-def build():
+def build(name=NAME):
+    global CUR
+    CUR = name
+    var = VARIANTS[name]
     master = json.load(open(MASTER))
     cells = master["cells"]
     runtime = master_cell(cells, "# 1. Laufzeit-Check")
@@ -454,17 +480,23 @@ def build():
     runner = m.group(0).rstrip() + "\n\n\nrun(\"--help\")\n"
     runtime_md = next(src(c) for c in cells if c["cell_type"] == "markdown" and src(c).startswith("## 1. Laufzeit-Check"))
     download = DOWNLOAD.strip("\n") + "\n\n" + runner + "\n" + DOWNLOAD_TAIL.strip("\n") + "\n"
+    intro = INTRO if var["banner"] is None else sub1(INTRO, r"^> \*\*Run-Notebook `dsse-sideB`\*\*.*?\n\n", var["banner"] + "\n\n")
+    config_cell = sub1(CONFIG, r"^MODELS = list\(config\.PYTHIA_SIZES\)[^\n]*",
+                       f"MODELS = {var['models']}" + (" " * max(1, 55 - len(var['models'])) + "# this session's models (the other session takes the rest)"))
+    config_cell = sub1(config_cell, r'^REVISIONS = \["step0", "step2000", "step16000", "step143000"\]', f"REVISIONS = {var['revisions']}")
+    if var["baselines_first"]:
+        config_cell = sub1(config_cell, r"^BASELINES_FIRST = False", "BASELINES_FIRST = True ")
     nb = {
         "nbformat": master["nbformat"], "nbformat_minor": master["nbformat_minor"],
         "metadata": {**master["metadata"], "colab": {**master["metadata"].get("colab", {}), "gpuType": "A100"},
                      "accelerator": "GPU"},
-        "cells": [md(INTRO), md(runtime_md), code(runtime), md(INSTALL_MD), code(install), md(DOWNLOAD_MD), code(download),
-                  md(CONFIG_MD), code(CONFIG), md(EXTRACT_MD), code(EXTRACT), md(PROBE_MD), code(PROBE), md(REPORT_MD), code(REPORT),
+        "cells": [md(intro), md(runtime_md), code(runtime), md(INSTALL_MD), code(install), md(DOWNLOAD_MD), code(download),
+                  md(CONFIG_MD), code(config_cell), md(EXTRACT_MD), code(EXTRACT), md(PROBE_MD), code(PROBE), md(REPORT_MD), code(REPORT),
                   md(FOOTER)],
     }
     for cell in nb["cells"]:
         if cell["cell_type"] == "code":
-            compile(src(cell), NAME, "exec")
+            compile(src(cell), name, "exec")
     return nb
 
 
@@ -474,13 +506,14 @@ def main():
     args = ap.parse_args()
     import nbformat
     os.makedirs(args.out, exist_ok=True)
-    nb = build()
-    path = os.path.join(args.out, f"{NAME}.ipynb")
-    with open(path, "w") as f:
-        json.dump(nb, f, indent=1, ensure_ascii=False)
-        f.write("\n")
-    nbformat.validate(nbformat.read(path, as_version=4))
-    print(f"{path}: {len(nb['cells'])} cells")
+    for name in VARIANTS:
+        nb = build(name)
+        path = os.path.join(args.out, f"{name}.ipynb")
+        with open(path, "w") as f:
+            json.dump(nb, f, indent=1, ensure_ascii=False)
+            f.write("\n")
+        nbformat.validate(nbformat.read(path, as_version=4))
+        print(f"{path}: {len(nb['cells'])} cells")
 
 
 if __name__ == "__main__":

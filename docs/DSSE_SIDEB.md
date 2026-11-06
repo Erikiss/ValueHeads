@@ -964,4 +964,10 @@ fand fünf bestätigte und sechs kleine Punkte; alle sind umgesetzt:
    Zelle 6 liest nur die Paare dieser Session und fängt halb geschriebene Dateien der zweiten Session ab (Hinweis zur
    Reihenfolge der Baselines bei zwei Sessions im Zellentext); Zelle 3 meldet einen Projektstand ohne `dsse_probe` klar.
 
+7. **Zweites Notebook für die parallele Session.** `scripts/make_dsse_notebook.py` erzeugt aus denselben Zellen zusätzlich
+   `notebooks/runs/dsse-sideB-2.ipynb` (`VARIANTS`): `MODELS = ["pythia-2.8b"]`, `REVISIONS` rückwärts (`step143000` → `step0`),
+   `BASELINES_FIRST = True` (Baselines vor der Extraktionsschleife, idempotent; Session 1 überspringt sie dann per Fingerprint).
+   Grund: ein zweiter Colab-Tab desselben Notebook-Pfads dockt an die erste Laufzeit an; die umgekehrte Reihenfolge
+   verhindert, dass beide Sessions dasselbe Paar rechnen, wenn Session 1 nach ~3 h bei 2.8b ankommt.
+
 Tests: `tests/test_dsse_probe.py` 26 Tests (~50 s); die ersten 22 wie in Anhang C.

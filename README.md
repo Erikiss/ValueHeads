@@ -363,7 +363,11 @@ python -m valueheads_pythia.cli dsse-probe --stage report              # Report 
 ```
 
 Run-Notebook für eine A100: `notebooks/runs/dsse-sideB.ipynb` (erzeugt von `scripts/make_dsse_notebook.py`;
-[Colab-Link](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/dsse-sideB.ipynb)):
+[Colab-Link](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/dsse-sideB.ipynb)); für eine
+parallele zweite Session auf demselben Drive-Ordner `notebooks/runs/dsse-sideB-2.ipynb`
+([Colab-Link](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/dsse-sideB-2.ipynb): nur
+pythia-2.8b, Checkpoints rückwärts, Baselines zuerst; eigener Pfad, weil ein zweiter Tab desselben Notebooks an die erste
+Laufzeit andockt):
 Download auf die Colab-Disk mit Hash-Prüfung, Konfiguration (`MODELS`, `REVISIONS`, `N_ROWS`, `LAYER_STRIDE`), idempotente
 Extraktionsschleife mit Token-Budget und ETA nach dem ersten Paar, Probes + Baselines, Report. **Budget:** 16.36 M Tokens je
 (Modell, Checkpoint); A100 160m ~3 min · 410m ~6 min · 1b ~15 min · 1.4b ~22 min · 2.8b 27-45 min (17 von 32 Layern,
@@ -567,7 +571,7 @@ valueheads_pythia/      config, models (o_proj-Resolver, Numerik-Policy), hooks,
 scripts/                run_smoke.sh, run_localize.sh, run_causal.sh, run_sweep.sh, make_run_notebooks.py,
                         make_overlap_notebook.py, make_ablation_notebook.py, make_dsse_notebook.py
 notebooks/              ValueHeadsPythia_Colab.ipynb (12 Zellen, ohne Ausgaben gespeichert); runs/ (erzeugte Run-Notebooks,
-                        u. a. qwen3-4b-overlap.ipynb, qwen3-4b-base-ablation.ipynb, qwen3-4b-ablation.ipynb, dsse-sideB.ipynb)
+                        u. a. qwen3-4b-overlap.ipynb, qwen3-4b-base-ablation.ipynb, qwen3-4b-ablation.ipynb, dsse-sideB.ipynb, dsse-sideB-2.ipynb)
 tests/                  pytest (Hook-Layout, Masken-Positionen, Datenzählungen, Probing vs. Referenz-Repo, Resume, ...)
 data/                   jailbreakbench.csv, maliciousinstruct.csv (nur Modus paper); icl/concept_tasks.json (ICL-Batterie)
 docs/                   eval_likelihood.md, ABLATION_DESIGN.md (Spezifikation des kausalen Tests), DSSE_SIDEB.md (DSSE Seite B)
