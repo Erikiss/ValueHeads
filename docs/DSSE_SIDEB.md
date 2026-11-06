@@ -971,3 +971,33 @@ fand fünf bestätigte und sechs kleine Punkte; alle sind umgesetzt:
    verhindert, dass beide Sessions dasselbe Paar rechnen, wenn Session 1 nach ~3 h bei 2.8b ankommt.
 
 Tests: `tests/test_dsse_probe.py` 26 Tests (~50 s); die ersten 22 wie in Anhang C.
+
+### Anhang C.3: Hub-Zweige mit falschen Einzeldateien (2026-11-06, nach dem ersten Lauf)
+
+Der Zwischenreport des ersten Laufs zeigte für **pythia-2.8b** vier identische Zeilen (step0 = step2000 = step16000 =
+step143000, `d_step0` exakt 0). Ursache (per Hub-API verifiziert): Die Zweige `step0`, `step2000` und `step16000` von
+`EleutherAI/pythia-2.8b` enthalten neben den echten, geshardeten Gewichten (`model-0000x-of-00002.safetensors` +
+`model.safetensors.index.json`, je Zweig eigene LFS-Objekte) zusätzlich **die `model.safetensors` und `pytorch_model.bin`
+von `main`** (LFS-Objekt `ab496f1c…` bzw. `36f0f93d…`). transformers bevorzugt die Einzeldatei vor dem Index und hat deshalb
+für diese drei Revisionen die Endgewichte geladen; `step143000` trägt nur seine eigene Einzeldatei (= Ende). Die Manifeste
+unterschieden sich trotzdem (`commit_sha` kommt aus der je Zweig geladenen `config.json`). 160m, 410m und 1b haben je Zweig
+eigene Einzeldateien, 1.4b nur Shards: deren Dateien sind gültig (Probe-Tabellen je Revision verschieden, geprüft).
+
+Behebung:
+
+1. `models.hub_weight_files` / `choose_weight_files` / `weight_source`: Liegen auf einem Zweig Einzeldatei **und** Index
+   vor, werden nur die Shards (plus Index, Config, Tokenizer) per `snapshot_download(ignore_patterns=[model.safetensors,
+   pytorch_model.bin, …])` geholt und aus dem lokalen Snapshot geladen. `vh_info` und das Feature-Manifest tragen
+   `weight_files`, `weight_source` und `weight_fingerprint` (sha256 über die LFS-Objekt-IDs der benutzten Dateien).
+2. `weight_fingerprint` ist Teil von `EXTRACTION_IDENTITY` (Probe-Fingerprint) und von `MANIFEST_KEYS` (nur verglichen,
+   wenn das Manifest einen trägt). `stale_weight_source`: eine Datei ohne Fingerprint von einem *mehrdeutigen* Zweig wird
+   von `--stage extract` automatisch neu gebaut (Meldung im Log); Dateien von eindeutigen Zweigen bleiben gültig.
+3. `key_table`: identische Out-of-Fold-Vorhersagen wie step0 (oder gleicher Fingerprint) → Spalte `identical_to_step0`,
+   Hinweis in `pairing_note`, Verdikt „ungueltig (identische Features wie step0; Gewichte neu laden)".
+4. Notebook: die Extraktionszelle meldet „NEU extrahiert", wenn eine vorhandene Datei neu gebaut wurde, und druckt
+   Gewichtsquelle und Fingerprint je Paar.
+
+Tests: `test_choose_weight_files_and_fingerprint`, `test_manifest_fingerprint_tolerance_and_stale_detection`,
+`test_key_table_flags_identical_features`, `test_hub_weight_files_real_branches` (Netz; prüft die Hub-Lage).
+Folge für den laufenden Lauf: Notebook 2 nach dem Pull erneut starten; es baut nur die drei betroffenen 2.8b-Paare neu
+(je ~12 min Extraktion plus Probe) und schreibt den Report neu.

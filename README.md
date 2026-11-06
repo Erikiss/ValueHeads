@@ -386,7 +386,10 @@ fällt der Smoke von selbst auf das Tiny-Modell zurück, `VH_NB_TINY=1` erzwingt
 `scripts/make_dsse_notebook.py` und in `docs/DSSE_SIDEB.md` Abschnitt 10. Gepaarte Vergleiche (gegen TF-IDF, step0, Metadaten)
 setzen dieselbe Zeilenstichprobe voraus (`rows_sha256` von Feature-Datei und Baselines; sonst „nicht prüfbar“ mit Warnung im
 Report); die Winkel der Verhaltensrichtungen sind in-sample, der Report nennt dazu die Fold-Stabilität der Mass-Mean-Richtungen. Der Probe-Fingerprint enthält die Extraktions-Identität der Feature-Datei (eine neu extrahierte Datei wird immer neu
-geprobt); `--stage download` verweigert ein Ziel unter `/content/drive/`.
+geprobt); `--stage download` verweigert ein Ziel unter `/content/drive/`. Gewichtsquelle: Trägt ein Hub-Zweig eine Einzeldatei
+**und** einen geshardeten Index (so `EleutherAI/pythia-2.8b` auf `step0`/`step2000`/`step16000`, wo die Einzeldatei die
+`main`-Gewichte ist), lädt `models.load_model` nur die Shards; Manifest und Report tragen einen Gewichts-Fingerprint, identische
+Vorhersagen zwischen Revisionen werden als ungültig markiert (Anhang C.3 der Spezifikation).
 
 ## Modus `paper` vs. `pythia`
 

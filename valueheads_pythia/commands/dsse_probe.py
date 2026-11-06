@@ -134,7 +134,7 @@ def _expected_layers(short, args, n_datasets):
 
 
 def stage_extract(args, p, raw_dir, say):
-    from ..models import load_model, resolve_device, set_seed
+    from ..models import choose_weight_files, hub_weight_files, load_model, resolve_device, set_seed, weight_fingerprint
     device = resolve_device(args.device)
     batch_size = args.batch_size or (64 if device.startswith("cuda") else 16)
     max_tokens = args.max_tokens_per_batch or (16384 if device.startswith("cuda") else 4096)
@@ -146,15 +146,24 @@ def stage_extract(args, p, raw_dir, say):
     os.makedirs(p["features"], exist_ok=True)
     for revision in _revisions(args):
         out_path = D.feature_path(p, short, revision)
+        files = None if args.tiny else hub_weight_files(hf_id, revision)
+        used, ambiguous = choose_weight_files(files)
         expect = {"version": D.VERSION, "n_rows": args.n_rows, "row_seed": D.ROW_SEED, "max_length": args.max_length,
                   "prompt_cap": args.prompt_cap, "hf_id": hf_id, "revision": revision, "rows_sha256": rows_sha,
-                  "layers": _expected_layers(short, args, len(rows.dataset_ids))}
+                  "layers": _expected_layers(short, args, len(rows.dataset_ids)), "weight_fingerprint": weight_fingerprint(used)}
+        if ambiguous:
+            say(f"[dsse] {hf_id}@{revision}: Hub branch holds model.safetensors AND a sharded index; the shards are used "
+                f"({len(used)} files), the single file is ignored")
         try:
             done = D.feature_done(out_path, expect)
         except RuntimeError as e:
             if not args.force:
                 raise
             say(f"[dsse] --force: rebuilding ({e})")
+            done = False
+        if done and D.stale_weight_source(D.feature_manifest(out_path), ambiguous):
+            say(f"[dsse] {os.path.basename(out_path)}: extracted before the weight-source check from an ambiguous Hub branch "
+                f"(no weight_fingerprint in its manifest): rebuilding, its weights may be main's")
             done = False
         if done and not args.force:
             say(f"[dsse] skip {out_path}: feature file exists for these settings")
@@ -172,6 +181,8 @@ def stage_extract(args, p, raw_dir, say):
         L = info["geometry"]["layers"]
         d = info["hidden"]
         layers = D.select_layers(L, d, len(rows.dataset_ids), stride=args.layer_stride)
+        say(f"[dsse] weights: {info.get('weight_source')} {[p for p, _ in (info.get('weight_files') or [])]} fingerprint "
+            f"{str(info.get('weight_fingerprint'))[:12]}")
         say(f"[dsse] model {info['model']}@{info['revision']} ({info.get('hf_id')}, commit {str(info.get('commit_sha'))[:12]}): "
             f"L/d = {L}/{d}, dtype {info['dtype']}, attn {info['attn_impl']}, device {info['device']}, load {time.time() - t0:.0f}s")
         say(f"[dsse] layers {len(layers)}/{L} ({'all' if len(layers) == L else 'every 2nd + last'}), fp16 file "

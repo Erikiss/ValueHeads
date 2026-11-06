@@ -101,6 +101,65 @@ def resolve_commit_sha(hf_id, revision=None):
         return None
 
 
+WEIGHT_SUFFIXES = (".safetensors", ".bin", ".safetensors.index.json")
+
+
+def hub_weight_files(hf_id, revision=None):
+    """Sorted [(path, lfs_sha256 | None)] of the weight files on the Hub branch `revision` of `hf_id` (safetensors, bin,
+    index). None when the Hub cannot be reached (offline) or `hf_id` is a local directory."""
+    if os.path.isdir(hf_id):
+        return None
+    try:
+        from huggingface_hub import HfApi
+        out = []
+        for e in HfApi().list_repo_tree(hf_id, revision=revision):
+            if e.path.endswith(WEIGHT_SUFFIXES):
+                lfs = getattr(e, "lfs", None)
+                out.append((e.path, getattr(lfs, "sha256", None) if lfs is not None else None))
+        return sorted(out)
+    except Exception:
+        return None
+
+
+def choose_weight_files(files):
+    """Which weight files a checkpoint load must use, given hub_weight_files(). transformers prefers model.safetensors
+    over a sharded index. EleutherAI/pythia-2.8b's step0 / step2000 / step16000 branches carry main's model.safetensors
+    (and main's pytorch_model.bin) NEXT TO the real per-step shards, so the preferred single file is the wrong
+    checkpoint. Rule: when a branch holds both a single model.safetensors and a model.safetensors.index.json, the
+    shards are trusted and the single file is ignored (ambiguous = True). Returns (used_files, ambiguous)."""
+    if not files:
+        return None, False
+    names = {p for p, _ in files}
+    shards = [(p, s) for p, s in files if p.startswith("model-") and p.endswith(".safetensors")]
+    if "model.safetensors.index.json" in names and shards:
+        ambiguous = "model.safetensors" in names
+        return shards, ambiguous
+    if "model.safetensors" in names:
+        return [(p, s) for p, s in files if p == "model.safetensors"], False
+    return [(p, s) for p, s in files if p.endswith(".bin")], False
+
+
+def weight_fingerprint(used):
+    """sha256 over the LFS object ids of the weight files a load uses; None without Hub information."""
+    if not used or any(s is None for _, s in used):
+        return None
+    import hashlib
+    return hashlib.sha256("|".join(f"{p}:{s}" for p, s in sorted(used)).encode()).hexdigest()
+
+
+def weight_source(hf_id, revision=None):
+    """(load_from, used_files, ambiguous, fingerprint): the path to load from (hf_id, or a local snapshot holding only
+    the shards + index + config/tokenizer when the branch is ambiguous, see choose_weight_files), the weight files that
+    load uses, whether the branch was ambiguous, and the fingerprint of the used files."""
+    files = hub_weight_files(hf_id, revision)
+    used, ambiguous = choose_weight_files(files)
+    if not ambiguous:
+        return hf_id, used, False, weight_fingerprint(used)
+    from huggingface_hub import snapshot_download
+    local = snapshot_download(hf_id, revision=revision, ignore_patterns=["model.safetensors", "pytorch_model.bin", "*.msgpack", "*.h5", "*.ckpt"])
+    return local, used, True, weight_fingerprint(used)
+
+
 def load_tokenizer(hf_id, revision=None, trust_remote_code=False):
     """(tokenizer, revision it was loaded from). Pythia models use config.PYTHIA_TOKENIZER_REVISION for every checkpoint
     (identical encodings; early pythia-2.8b revisions lack the special-token attributes). A missing pad token falls back
@@ -132,8 +191,10 @@ def load_model(name_or_hf_id, revision=None, device="auto", dtype=None, attn_imp
     check_numerics(dtype, attn_impl, allow_unsafe)
 
     tokenizer, tok_revision = load_tokenizer(hf_id, revision, trust_remote_code)
+    load_from, used_files, ambiguous, fingerprint = weight_source(hf_id, revision)
     model = AutoModelForCausalLM.from_pretrained(
-        hf_id, revision=revision, dtype=dtype, attn_implementation=attn_impl, trust_remote_code=trust_remote_code,
+        load_from, revision=None if load_from != hf_id else revision, dtype=dtype, attn_implementation=attn_impl,
+        trust_remote_code=trust_remote_code,
     ).eval()
     model.to(device)
     model.generation_config.pad_token_id = tokenizer.pad_token_id
@@ -144,6 +205,8 @@ def load_model(name_or_hf_id, revision=None, device="auto", dtype=None, attn_imp
         "device": device, "transformers": transformers.__version__, "torch": torch.__version__,
         "geometry": dict(zip(("layers", "heads", "head_dim"), model_geometry(model.config))),
         "kv_heads": num_kv_heads(model.config), "hidden": model.config.hidden_size,
+        "weight_files": used_files, "weight_source": "shards (ambiguous branch)" if ambiguous else "hub",
+        "weight_fingerprint": fingerprint,
     }
     return model, tokenizer
 

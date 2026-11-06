@@ -624,6 +624,8 @@ def extract_dsse(model, tokenizer, rows, out_path, layers=None, batch_size=64, m
         "tokens_per_second": round(tokens_seen / elapsed, 1) if elapsed > 0 else None,
         "created": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t0)), "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
         "tiny": bool(info.get("tiny", False)), "rows_sha256": rows.rows_sha256(), "feature_dtype": "float16",
+        "weight_files": info.get("weight_files"), "weight_source": info.get("weight_source"),
+        "weight_fingerprint": info.get("weight_fingerprint"),
     }
     manifest.update(extra_manifest or {})
     arrays = {"dataset_ids": np.array(rows.dataset_ids), "layers": np.array(layers, dtype=np.int16),
@@ -676,13 +678,22 @@ def publish_staged(tmp, staged_manifest, out_path, say=print):
     os.remove(staged_manifest)
 
 
-MANIFEST_KEYS = ("version", "n_rows", "row_seed", "max_length", "prompt_cap", "layers", "hf_id", "revision", "rows_sha256")
+MANIFEST_KEYS = ("version", "n_rows", "row_seed", "max_length", "prompt_cap", "layers", "hf_id", "revision", "rows_sha256",
+                 "weight_fingerprint")
 
 
 def manifest_mismatch(manifest, expect, keys=MANIFEST_KEYS):
-    """Keys of `expect` (not None) whose value differs from `manifest` (JSON-normalised)."""
-    return [k for k in keys if k in expect and expect[k] is not None
-            and json.loads(json.dumps(manifest.get(k))) != json.loads(json.dumps(expect[k]))]
+    """Keys of `expect` (not None) whose value differs from `manifest` (JSON-normalised). weight_fingerprint is compared
+    only when the manifest carries one (older files; see stale_weight_source for the ambiguous-branch case)."""
+    bad = []
+    for k in keys:
+        if k not in expect or expect[k] is None:
+            continue
+        if k == "weight_fingerprint" and not manifest.get(k):
+            continue
+        if json.loads(json.dumps(manifest.get(k))) != json.loads(json.dumps(expect[k])):
+            bad.append(k)
+    return bad
 
 
 def recover_staged(stage_dir, out_path, expect, say=print):
@@ -714,6 +725,21 @@ def recover_staged(stage_dir, out_path, expect, say=print):
     say(f"[dsse] recovering staged {tmp} ({n} datasets, finished {manifest.get('finished')}) -> {out_path}")
     publish_staged(tmp, staged_manifest, out_path, say=say)
     return True
+
+
+def feature_manifest(path):
+    """The sidecar manifest of a feature file, or None."""
+    if not os.path.exists(manifest_path(path)):
+        return None
+    with open(manifest_path(path)) as f:
+        return json.load(f)
+
+
+def stale_weight_source(manifest, ambiguous):
+    """True for a feature file extracted before the weight-source check from an AMBIGUOUS Hub branch (manifest without
+    weight_fingerprint): its weights may be main's instead of the revision's (EleutherAI/pythia-2.8b step0 / step2000 /
+    step16000), so it must be rebuilt. Files from unambiguous branches keep their validity."""
+    return bool(ambiguous) and bool(manifest) and not manifest.get("weight_fingerprint")
 
 
 def feature_done(path, expect):
@@ -1382,7 +1408,8 @@ def probe_settings(n_pcs=N_PCS, folds=FOLDS, boot=BOOT, perms=PERMS, seed=42, ta
             "seed": int(seed), "tasks": list(tasks or TASKS), "n_jobs": n_jobs}
 
 
-EXTRACTION_IDENTITY = ("version", "n_rows", "row_seed", "max_length", "prompt_cap", "layers", "hf_id", "commit_sha", "revision", "finished")
+EXTRACTION_IDENTITY = ("version", "n_rows", "row_seed", "max_length", "prompt_cap", "layers", "hf_id", "commit_sha", "revision", "finished",
+                       "weight_fingerprint")
 
 
 def _fingerprint(settings, extra):
@@ -1833,6 +1860,13 @@ def key_table(results, oof_loader, boot=BOOT, seed=0):
                     p0 = None if o0 is None else o0.get(_oof_key("act", "behavior", "raw", "method", b0[0], b0[1]))
                     d = _paired("multiclass", y, pa, p0, boot, seed)
                     row.update(d_step0=d["diff"], d_step0_lo=d["lo"], d_step0_hi=d["hi"], d_step0_p=d["p_boot"])
+                    # identical out-of-fold predictions as step0 = identical features = the same weights were loaded
+                    # (EleutherAI/pythia-2.8b step branches carry main's model.safetensors next to the real shards)
+                    same_fp = (info.get("manifest", {}).get("weight_fingerprint") and s0.get("manifest", {}).get("weight_fingerprint")
+                               and info["manifest"]["weight_fingerprint"] == s0["manifest"]["weight_fingerprint"])
+                    if pa is not None and p0 is not None and (np.array_equal(pa, p0) or same_fp):
+                        row["identical_to_step0"] = True
+                        notes.append("identische Vorhersagen wie step0: dieselben Gewichte geladen (Hub-Zweig mit main-Gewichten?); Datei neu extrahieren")
         bm = best.get("miss_sol")
         if bm:
             v, lo, hi, _ = _pooled_value(sub, "act", "miss_sol", "raw", "method", bm[0], bm[1], "auc")
@@ -1866,6 +1900,7 @@ def key_table(results, oof_loader, boot=BOOT, seed=0):
                    n_aligned=ang.get("n_aligned"), n_opposed=ang.get("n_opposed"), n_pairs=ang.get("n_pairs"),
                    eff_rank=ang.get("effective_rank_massmean"), fold_spearman_min=(min(ang["fold_spearman"]) if ang.get("fold_spearman") else np.nan),
                    fold_pair_sd_mean=ang.get("fold_pair_sd_mean", np.nan))
+        row.setdefault("identical_to_step0", False)
         row["pairing_note"] = "; ".join(notes)
         row["verdict"] = verdict(row)
         rows.append(row)
@@ -1878,6 +1913,8 @@ def verdict(row):
     or step0 file were built from another row sample (pairing_note) is 'nicht pruefbar'."""
     if row.get("revision") == "step0":
         return "Referenz (step0)"
+    if row.get("identical_to_step0"):
+        return "ungueltig (identische Features wie step0; Gewichte neu laden)"
     lo_t, lo_0 = row.get("d_tfidf_lo", np.nan), row.get("d_step0_lo", np.nan)
     if np.isnan(lo_t) or np.isnan(lo_0):
         note = row.get("pairing_note") or ""

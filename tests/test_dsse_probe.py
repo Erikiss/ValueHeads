@@ -795,3 +795,86 @@ def test_collector_runs_decoder_only(model_tok):
     ref = model(**enc, output_hidden_states=True).hidden_states
     for slot, l in enumerate([0, 1]):
         assert torch.allclose(last[:, slot], ref[l + 1][torch.arange(2), enc["attention_mask"].sum(1) - 1].float(), atol=1e-4)
+
+
+# ----------------------------------------------------------------------------- 27-30: trusted weight source (Hub branches with main's weights)
+
+from valueheads_pythia import models as M
+
+
+def test_choose_weight_files_and_fingerprint():
+    single = [("model.safetensors", "a" * 64), ("pytorch_model.bin", "b" * 64)]
+    shards = [("model-00001-of-00002.safetensors", "c" * 64), ("model-00002-of-00002.safetensors", "d" * 64), ("model.safetensors.index.json", None)]
+    used, amb = M.choose_weight_files(sorted(single))
+    assert [p for p, _ in used] == ["model.safetensors"] and amb is False
+    used, amb = M.choose_weight_files(sorted(shards + [("pytorch_model.bin", "e" * 64)]))
+    assert [p for p, _ in used] == ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"] and amb is False
+    used, amb = M.choose_weight_files(sorted(single + shards))                 # the pythia-2.8b step0 layout: shards win
+    assert [p for p, _ in used] == ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"] and amb is True
+    used, amb = M.choose_weight_files([("pytorch_model.bin", "b" * 64)])
+    assert [p for p, _ in used] == ["pytorch_model.bin"] and amb is False
+    assert M.choose_weight_files(None) == (None, False) and M.weight_fingerprint(None) is None
+    f1 = M.weight_fingerprint([("model-00002-of-00002.safetensors", "d" * 64), ("model-00001-of-00002.safetensors", "c" * 64)])
+    f2 = M.weight_fingerprint([("model-00001-of-00002.safetensors", "c" * 64), ("model-00002-of-00002.safetensors", "d" * 64)])
+    assert f1 == f2 and len(f1) == 64 and f1 != M.weight_fingerprint(single)
+    assert M.weight_fingerprint([("model.safetensors", None)]) is None       # no LFS id -> no fingerprint
+
+
+def test_manifest_fingerprint_tolerance_and_stale_detection():
+    expect = {"version": D.VERSION, "n_rows": 4, "weight_fingerprint": "f" * 64}
+    old = {"version": D.VERSION, "n_rows": 4}                                  # file from before the check
+    assert D.manifest_mismatch(old, expect) == []                              # tolerated ...
+    assert D.stale_weight_source(old, ambiguous=False) is False                # ... and valid from an unambiguous branch
+    assert D.stale_weight_source(old, ambiguous=True) is True                  # ... but rebuilt from an ambiguous one
+    new_same = {"version": D.VERSION, "n_rows": 4, "weight_fingerprint": "f" * 64}
+    new_other = {"version": D.VERSION, "n_rows": 4, "weight_fingerprint": "0" * 64}
+    assert D.manifest_mismatch(new_same, expect) == [] and D.manifest_mismatch(new_other, expect) == ["weight_fingerprint"]
+    assert D.stale_weight_source(new_same, ambiguous=True) is False and D.stale_weight_source(None, True) is False
+
+
+def test_key_table_flags_identical_features(tiny_run):
+    """A revision whose out-of-fold predictions equal step0's (same weights loaded) is marked ungueltig."""
+    root = tiny_run["root"]
+    p = config.paths(root)
+    out = p["dsse"]
+    for ext in ("_probe.csv", "_probe.json", "_oof.npz", "_angles.npz", "_angles.csv", "_angles.json", "_rank.csv"):
+        src = os.path.join(out, "tiny-gptneox_step0" + ext)
+        if not os.path.exists(src):
+            continue
+        dst = os.path.join(out, "tiny-gptneox_step9" + ext)
+        if ext == "_probe.csv":
+            df = pd.read_csv(src); df["revision"] = "step9"; df.to_csv(dst, index=False)
+        elif ext == "_probe.json":
+            with open(src) as f:
+                j = json.load(f)
+            j["revision"] = "step9"; j["manifest"]["revision"] = "step9"; j["manifest"]["finished"] = "later"
+            with open(dst, "w") as f:
+                json.dump(j, f)
+        else:
+            shutil.copyfile(src, dst)
+    try:
+        res = D.collect_results(out, models=["tiny-gptneox"])
+        key = D.key_table(res, D.make_oof_loader(out), boot=20)
+        row = key[key.revision == "step9"].iloc[0]
+        assert bool(row.identical_to_step0) is True and row.verdict.startswith("ungueltig") and "identische Vorhersagen" in row.pairing_note
+        assert bool(key[key.revision == "step0"].iloc[0].identical_to_step0) is False
+    finally:
+        for fn in os.listdir(out):
+            if fn.startswith("tiny-gptneox_step9"):
+                os.remove(os.path.join(out, fn))
+
+
+def test_hub_weight_files_real_branches():
+    """Network: pythia-160m step0 has its own model.safetensors; pythia-2.8b step0 is the ambiguous layout."""
+    f160 = M.hub_weight_files("EleutherAI/pythia-160m", "step0")
+    if f160 is None:
+        pytest.skip("Hub not reachable")
+    used, amb = M.choose_weight_files(f160)
+    assert [p for p, _ in used] == ["model.safetensors"] and amb is False and M.weight_fingerprint(used)
+    f28 = M.hub_weight_files("EleutherAI/pythia-2.8b", "step0")
+    used, amb = M.choose_weight_files(f28)
+    assert amb is True and len(used) == 2 and all(p.startswith("model-") for p, _ in used)
+    main_single = [s for p, s in M.hub_weight_files("EleutherAI/pythia-2.8b", "main") if p == "model.safetensors"]
+    step0_single = [s for p, s in f28 if p == "model.safetensors"]
+    assert main_single == step0_single                                         # the documented Hub defect
+    assert M.hub_weight_files(str(os.getcwd())) is None                        # local directories: no Hub lookup

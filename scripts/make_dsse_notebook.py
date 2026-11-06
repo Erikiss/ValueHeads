@@ -320,14 +320,18 @@ for m, r in pairs:
         print(f"{os.path.basename(path)}: bereits geprobt und von Drive geloescht (KEEP_FEATURES = False), uebersprungen")
         continue
     existed = os.path.exists(path)
+    before = (D.feature_manifest(path) or {}).get("finished")      # a stale file (ambiguous Hub branch) is rebuilt by the CLI
     run("dsse-probe", "--stage", "extract", "--model", m, "--revisions", r, "--raw_dir", RAW_DIR, "--n_rows", N_ROWS,
         "--max_length", MAX_LENGTH, "--prompt_cap", PROMPT_CAP, "--layer_stride", LAYER_STRIDE.get(m, "auto"), "--stage_dir", STAGE_DIR,
         "--device", DEVICE, "--dtype", dtype, "--attn_impl", attn, *EXTRACT_BATCH, *PROGRESS, *(["--tiny"] if TINY else []))
     man = D.load_feature_meta(path)["manifest"]
     ts = man["token_stats"]
+    rebuilt = existed and man.get("finished") != before
+    existed = existed and not rebuilt
     print(f"    -> {os.path.basename(path)}: n={man['n_datasets']} tokens={ts['n_tokens']} cut_rate={ts['cut_rate']:.4f} "
           f"layers={len(man['layers'])}/{man['num_layers']} {man.get('dtype')}/{man.get('attn_impl')} {man.get('tokens_per_second')} tok/s "
-          f"{man.get('seconds')}s {os.path.getsize(path) / 1e9:.3f} GB" + ("  (vorhanden, uebersprungen)" if existed else ""))
+          f"{man.get('seconds')}s {os.path.getsize(path) / 1e9:.3f} GB Gewichte {man.get('weight_source')} {str(man.get('weight_fingerprint'))[:10]}"
+          + ("  (vorhanden, uebersprungen)" if existed else ("  (NEU extrahiert: Datei war von einem mehrdeutigen Hub-Zweig)" if rebuilt else "")))
     if PROBE_INLINE:
         run("dsse-probe", "--stage", "probe", "--models", feature_model(m), "--revisions", r, *PROBE_ARGS)
         if not KEEP_FEATURES:
