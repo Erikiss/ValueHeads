@@ -249,6 +249,7 @@ def paths(root=None):
         "judge": os.path.join(results, "judge"),
         "sweep": os.path.join(results, "sweep"),
         "ablation": os.path.join(results, "ablation"),
+        "dsse": os.path.join(results, "dsse"),
         "manifest": os.path.join(results, "manifest.json"),
         "figures": figures,
         "heatmaps": os.path.join(figures, "heatmaps"),

@@ -324,6 +324,66 @@ primäre Familie nach Holm, Sekundäres ohne Befund, Trajektorie Base → Instru
 `{modell}_ablation_conditions.csv`, `{modell}_ablation_tests.csv` und je Modell `{modell}/` mit `selftest.json`, `refs.npz`,
 `m2_train.npz`, `probes_m2.npz`, `floor.json`, `gate.json`, `pilot.json`, `conditions/{name}.json` (+ `.m2.npz`).
 
+## DSSE Seite B: Repräsentation der Verhaltensänderung (Pythia, `dsse-probe`)
+
+**Frage.** Ein DSSE-Datensatz (Transluce, DSSE-1.1, arXiv 2611.06324) ist eine Sammlung von ~150 Prompt/Antwort-Paaren,
+die nach dem Finetuning eine von 18 Zielverhaltensweisen auslöst. Kodiert der Residualstrom eines **Basismodells**, das die
+Zeilen nur *liest*, bereits, (i) welches Verhalten der Satz auslösen würde, (ii) wie stark (Elicitation `qwen3_1_7b_opus`,
+Transfer `qwen3_4b_gemma`) und (iii) ob ein LLM-Auditor die Nebenwirkung übersieht (`mc_missed_sol`) — jenseits des
+lexikalischen Inhalts? Und wie ändert sich das mit Modellgröße (Pythia 160m-2.8b) und Training (`step0` = untrainiert =
+rein lexikalische Geometrie, `step2000`, `step16000`, `step143000`)? Spezifikation: `docs/DSSE_SIDEB.md`.
+
+**Daten und Lizenz.** `Transluce/DSSE` auf dem Hub (CC BY-NC 4.0; 6 915 Datensätze, 18 Verhalten, Generator-Methoden DE /
+PT / PT-noterse / DPG / LLS). Die Datensätze enthalten Red-Teaming-Text: **kein Befehl, Test, Notebook oder Report gibt
+Zeilentext aus oder speichert ihn** — nur ids, Labels, Zählungen, Hashes und Metriken. Die Rohdaten (111.6 MB, Bytes +
+sha256 aller 20 Dateien in `dsse_probe.DSSE_FILES`) liegen auf der Colab-Disk, nie auf Drive; Tests laufen auf synthetischen
+Pseudo-Wort-Zeilen (`make_synthetic_raw`).
+
+**Pipeline** (`valueheads_pythia/dsse_probe.py`, Kommando `dsse-probe --stage …`): `download`/`verify` (Hash-Prüfung) →
+`extract` (je Datensatz 16 feste, seed-gezogene Zeilen `"<prompt>\n<response>"`, Forward-Hooks auf jedem Block = Residualstrom
+vor `final_layer_norm`, Pooling am letzten Token und als Antwort-Mittel in fp32, Mittel je Datensatz → eine fp16-npz je
+Modell × Checkpoint mit einem Key je Layer, Manifest, idempotent; Truncation 512 mit Prompt-Cap 256, Schnittrate 2.98 %) →
+`baselines` (TF-IDF → SVD128 je Split neu gefittet, 10-dim Stilvektor, Metadaten ohne Auditor-Spalten) → `probe` (je Layer ×
+Pooling: StandardScaler → PCA 256 → balanced Logistik 18-Klassen / binär, RidgeCV für Elicitation / Transfer (zusätzlich
+`within` = je Verhalten demeant); zufälliger stratifizierter 5-fach-Split **und** Generator-Methoden-Split A = DE + PT gegen
+B = PT-noterse + DPG + LLS über die 8 Verhalten mit Datensätzen in beiden Gruppen; Perzentil-Bootstrap-CIs; am besten Layer
+Winkel zwischen den Verhaltensrichtungen (Mass-Mean + OvR) gegen Permutations- und N1-Null sowie Rangtest über
+Hauptkomponenten) → `report` (deutscher Report mit Kerntabelle und Abbildungen).
+
+**Primärer Vergleich (vorab festgelegt, F29).** Je Modell: balanced Accuracy des 18-Klassen-Probes am besten trainierten Layer
+im **methoden-ausgelassenen Split** gegen (a) `step0` an dessen bestem Layer und (b) TF-IDF-SVD128 auf denselben Zeilen, als
+gepaarte Bootstrap-Differenz über dieselben Testdatensätze. Die lexikalische Einbettung ist nach Generator organisiert
+(Silhouette nach Methode +0.23, nach Verhalten +0.002), deshalb zählt der Methoden-Split. Ohne CI-Ausschluss der 0 in beiden
+Differenzen wird keine „Repräsentation jenseits des Lexikalischen“ behauptet.
+
+```bash
+python -m valueheads_pythia.cli dsse-probe --stage all --model pythia-410m --revisions step0 step2000 step16000 step143000 \
+    --raw_dir /content/dsse_raw --stage_dir /content/dsse_stage      # download/verify -> extract -> baselines -> probe -> report
+python -m valueheads_pythia.cli dsse-probe --stage report              # Report über alle Feature-Dateien unter results/dsse/
+```
+
+Run-Notebook für eine A100: `notebooks/runs/dsse-sideB.ipynb` (erzeugt von `scripts/make_dsse_notebook.py`;
+[Colab-Link](https://colab.research.google.com/github/Erikiss/ValueHeads/blob/main/notebooks/runs/dsse-sideB.ipynb)):
+Download auf die Colab-Disk mit Hash-Prüfung, Konfiguration (`MODELS`, `REVISIONS`, `N_ROWS`, `LAYER_STRIDE`), idempotente
+Extraktionsschleife mit Token-Budget und ETA nach dem ersten Paar, Probes + Baselines, Report. **Budget:** 16.36 M Tokens je
+(Modell, Checkpoint); A100 160m ~3 min · 410m ~6 min · 1b ~15 min · 1.4b ~22 min · 2.8b 27-45 min (17 von 32 Layern,
+1.5-GB-Regel) je Checkpoint → **4.5-6 A100-Stunden** für 5 Modelle × 4 Checkpoints (~30-40 CU), ~48 GB Checkpoint-Downloads
+(je Revision gelöscht), **17.6 GB fp16-Features auf Drive**, ~1 h CPU-Probes. Empfehlung: zwei Sessions (160m-1.4b und 2.8b),
+gleicher Drive-Ordner `MyDrive/ValueHeadsPythia/dsse`. Die Konfigurationszelle prüft den freien Drive-Speicher vor der ersten
+Extraktion (ein Standard-Drive hat 15 GB); `KEEP_FEATURES = False` probt jedes Paar direkt nach der Extraktion und löscht die npz
+danach von Drive (Bedarf < 1.5 GB), `PROBE_INLINE = True` (Default) probt ohnehin direkt nach jedem Paar. Ein fertig gerechnetes
+Paar, dessen Verschieben nach Drive scheitert (Quota), bleibt im Staging-Ordner und wird vom nächsten `--stage extract` nachgeholt.
+
+Ergebnislayout: `features/{modell}_{revision}.npz` + `.manifest.json` (Drive), `results/dsse/{modell}_{revision}_probe.csv`
+(Long-Format, eine Zeile je Metrik) / `_probe.json` / `_oof.npz` / `_angles.{npz,csv,json}` / `_rank.csv`,
+`results/dsse/baselines_*`, `results/dsse/report.md`, `results/dsse/key_table.csv`, `results/dsse/figures/`. CPU-Smoke der
+CLI-Kette (synthetische Daten, pythia-160m@step0 oder `--tiny`) und des Notebooks (`VH_NB_SMOKE=1`; ohne Netz und Cache
+fällt der Smoke von selbst auf das Tiny-Modell zurück, `VH_NB_TINY=1` erzwingt es): Rezepte im Kopf von
+`scripts/make_dsse_notebook.py` und in `docs/DSSE_SIDEB.md` Abschnitt 10. Gepaarte Vergleiche (gegen TF-IDF, step0, Metadaten)
+setzen dieselbe Zeilenstichprobe voraus (`rows_sha256` von Feature-Datei und Baselines; sonst „nicht prüfbar“ mit Warnung im
+Report); die Winkel der Verhaltensrichtungen sind in-sample, der Report nennt dazu die Fold-Stabilität der Mass-Mean-Richtungen. Der Probe-Fingerprint enthält die Extraktions-Identität der Feature-Datei (eine neu extrahierte Datei wird immer neu
+geprobt); `--stage download` verweigert ein Ziel unter `/content/drive/`.
+
 ## Modus `paper` vs. `pythia`
 
 | | `--mode paper` | `--mode pythia` (Default) |
@@ -502,14 +562,15 @@ valueheads_pythia/      config, models (o_proj-Resolver, Numerik-Policy), hooks,
                         analysis/ (inkl. causal_plots), commands/, cli; kausaler Ablationstest: ablation (Eingriffe, Runner,
                         Referenzen, Selbsttest), ablation_sets (HH-Split, eingefrorene Sätze), ablation_stats (Bootstrap,
                         Holm, Gate, Befundtexte), icl_battery (ICL-Batterie + Query-Knockout), ablation_metrics,
-                        ablation_report, commands/ablate
+                        ablation_report, commands/ablate; DSSE Seite B: dsse_probe (Rohdaten, Residual-Collector,
+                        Extraktion, Splits, Probes, Baselines, Winkel, Rangtest, Report, Synthetik), commands/dsse_probe
 scripts/                run_smoke.sh, run_localize.sh, run_causal.sh, run_sweep.sh, make_run_notebooks.py,
-                        make_overlap_notebook.py, make_ablation_notebook.py
+                        make_overlap_notebook.py, make_ablation_notebook.py, make_dsse_notebook.py
 notebooks/              ValueHeadsPythia_Colab.ipynb (12 Zellen, ohne Ausgaben gespeichert); runs/ (erzeugte Run-Notebooks,
-                        u. a. qwen3-4b-overlap.ipynb, qwen3-4b-base-ablation.ipynb, qwen3-4b-ablation.ipynb)
+                        u. a. qwen3-4b-overlap.ipynb, qwen3-4b-base-ablation.ipynb, qwen3-4b-ablation.ipynb, dsse-sideB.ipynb)
 tests/                  pytest (Hook-Layout, Masken-Positionen, Datenzählungen, Probing vs. Referenz-Repo, Resume, ...)
 data/                   jailbreakbench.csv, maliciousinstruct.csv (nur Modus paper); icl/concept_tasks.json (ICL-Batterie)
-docs/                   eval_likelihood.md, ABLATION_DESIGN.md (Spezifikation des kausalen Tests)
+docs/                   eval_likelihood.md, ABLATION_DESIGN.md (Spezifikation des kausalen Tests), DSSE_SIDEB.md (DSSE Seite B)
 DESIGN.md               verbindliche Spezifikation (Kopie des Design-Tracks)
 SMOKE_RESULTS.md        Smoke-Lauf der kompletten Kette auf CPU: Befehle, Wall-Zeiten, Head-Tabellen, Eval-Summary, Sweep
 ```
@@ -533,3 +594,6 @@ SMOKE_RESULTS.md        Smoke-Lauf der kompletten Kette auf CPU: Befehle, Wall-Z
   `PKU-Alignment/BeaverTails` (CC-BY-NC-4.0, nur Modus paper), `Salesforce/wikitext` (CC-BY-SA-3.0);
   `data/jailbreakbench.csv` (JailbreakBench, Chao et al. 2024) und `data/maliciousinstruct.csv` (Huang et al. 2024)
   unverändert aus dem Referenz-Repo, siehe `data/README.md`.
+- DSSE (`Transluce/DSSE`, DSSE-1.1, CC BY-NC 4.0, arXiv 2611.06324; die PT/PT-noterse-Prompts stammen aus Stanford Alpaca,
+  DPG/LLS aus Tulu 2.5): nur für `dsse-probe`; es werden ausschließlich Zählungen, Hashes und Metriken gespeichert, nie
+  Zeilentext.

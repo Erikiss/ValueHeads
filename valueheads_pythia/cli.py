@@ -24,6 +24,7 @@ COMMANDS = {
     "selftest": "Hook-Layout, Masken-Positionen, Datenzaehlungen",
     "overlap": "Wert-Heads x ICL-Rollen (Qwen3, arXiv 2611.05344): layer-gematchte Permutations-Null, Spearman, Holm",
     "ablate": "Kausaler Test: Ablation der Wert-Head x ICL-Ueberlappung (Qwen3, Stage 0/1/2, idempotent)",
+    "dsse-probe": "DSSE Seite B: Residualstrom je DSSE-Datensatz (Pythia-Checkpoints), Probes + Baselines, Winkel, Report",
 }
 
 
